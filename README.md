@@ -1,7 +1,3 @@
-Here’s a detailed `README.md` file for your project. This file provides an overview of the project, setup instructions, usage examples, and other relevant information. It’s designed to help users (or yourself) understand and use the project effectively.
-
----
-
 # Somnia Auto-Bot
 
 The **Somnia Auto-Bot** is a Node.js-based automation tool designed to perform token swaps and automatic transactions on the Somnia network. It allows users to generate additional wallets, store their private keys securely, and perform circular transactions between the main wallet and generated wallets. The bot supports swapping tokens (`$PING` and `$PONG`) and sending native tokens (`STT`) automatically.
