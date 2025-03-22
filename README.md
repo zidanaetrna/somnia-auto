@@ -55,7 +55,12 @@ Before using the Somnia Auto-Bot, ensure you have the following installed:
    ```
 
 3. **Set Up `.env` File**:
-   Create a `.env` file in the root directory and add the following configuration:
+   Open a `.env` file in the src directory and add your privatekey:
+
+   ```bash
+   cd src && nano .env
+   ```
+   It will be looked like this:
    ```env
    # Network and Wallet Info
    RPC_URL=https://dream-rpc.somnia.network
