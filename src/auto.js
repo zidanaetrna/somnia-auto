@@ -1,5 +1,5 @@
 require('dotenv').config();
-const Web3 = require('web3');
+const { Web3 } = require('web3'); // Updated import for v4.x
 const ethers = require('ethers');
 const fs = require('fs');
 
@@ -16,7 +16,7 @@ if (!RPC_URL || !MAIN_PRIVATE_KEY || !PING_TOKEN || !PONG_TOKEN) {
     throw new Error('Missing required environment variables in .env file: RPC_URL, MAIN_PRIVATE_KEY, PING_TOKEN, PONG_TOKEN');
 }
 
-const web3 = new Web3(RPC_URL);
+const web3 = new Web3(RPC_URL); // Updated usage for v4.x
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const mainWallet = new ethers.Wallet(MAIN_PRIVATE_KEY, provider);
 
