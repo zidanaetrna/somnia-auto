@@ -149,7 +149,8 @@ Enter the number of times to swap (e.g., 2): 2
 ## Notes
 
 1. **Wallet Funding**:
-   - Generated wallets start with zero balance. Ensure the main wallet funds them with `STT` for gas fees and `$PING`/`$PONG` tokens for transfers.
+   - Please fund your main wallet with STT, Ping and Pong in order to make the bot
+   running perfectly.
 
 2. **Security**:
    - Never share your `.env` file or `privatekey.json` file. These contain sensitive information.
@@ -183,12 +184,8 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## Support
 
-For questions or issues, please open an issue on the [GitHub repository](https://github.com/your-username/somnia-auto-bot).
+For questions or issues, please open an issue on the [GitHub repository](https://github.com/zidanaetrna/somnia-auto/issues/new/choose).
 
 ---
 
 Enjoy using the Somnia Auto-Bot! 🚀
-
----
-
-This `README.md` provides a comprehensive guide for setting up and using your project. Let me know if you need further assistance!
