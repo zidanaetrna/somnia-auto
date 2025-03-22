@@ -38,7 +38,7 @@ async function generateWallets(numWallets) {
         const wallet = ethers.Wallet.createRandom();
         newWallets.push({
             address: wallet.address,
-            privateKey: wallet.privateKey
+            privateKey: wallet.privateKey.replace('0x', '') // Remove 0x prefix
         });
     }
 
