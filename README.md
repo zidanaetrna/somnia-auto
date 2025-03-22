@@ -45,7 +45,7 @@ Before using the Somnia Auto-Bot, ensure you have the following installed:
 
 1. **Clone the Repository**:
    ```bash
-   git clone git clone https://github.com/zidanaetrna/somnia-auto.git
+   git clone https://github.com/zidanaetrna/somnia-auto.git
    cd somnia-auto-bot
    ```
 
