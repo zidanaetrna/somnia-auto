@@ -44,7 +44,9 @@ if (!QUICKSWAP_ADDRESS) {
 const erc20Abi = [
     "function approve(address spender, uint256 amount) external returns (bool)",
     "function balanceOf(address account) external view returns (uint256)",
-    "function allowance(address owner, address spender) external view returns (uint256)"
+    "function allowance(address owner, address spender) external view returns (uint256)",
+    "function deposit() external payable",
+    "function withdraw(uint256 amount) external"
 ];
 
 const quickSwapAbi = [
@@ -109,6 +111,22 @@ const quickSwapAbi = [
     }
 ];
 
+// Factory ABI for checking liquidity pools
+const factoryAbi = [
+    {
+        "inputs": [
+            { "internalType": "address", "name": "tokenA", "type": "address" },
+            { "internalType": "address", "name": "tokenB", "type": "address" }
+        ],
+        "name": "poolByPair",
+        "outputs": [
+            { "internalType": "address", "name": "pool", "type": "address" }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    }
+];
+
 const quickSwapContract = new ethers.Contract(QUICKSWAP_ADDRESS, quickSwapAbi, wallet);
 
 // Create token contracts for non-native tokens
@@ -142,6 +160,19 @@ async function logContractDetails() {
     }
 }
 
+// Check if a liquidity pool exists for the token pair
+async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddress) {
+    try {
+        const factoryContract = new ethers.Contract(factoryAddress, factoryAbi, provider);
+        const poolAddress = await factoryContract.poolByPair(tokenInAddress, tokenOutAddress);
+        console.log(`Liquidity Pool for ${tokenInAddress} - ${tokenOutAddress}: ${poolAddress}`);
+        return poolAddress !== ethers.ZeroAddress;
+    } catch (error) {
+        console.error("Error checking liquidity pool:", error.message);
+        return false;
+    }
+}
+
 async function approveToken(tokenContract, tokenName, amount) {
     try {
         const allowance = await tokenContract.allowance(wallet.address, QUICKSWAP_ADDRESS);
@@ -157,6 +188,22 @@ async function approveToken(tokenContract, tokenName, amount) {
         console.error(`Error approving ${tokenName}:`, error);
         throw error;
     }
+}
+
+async function wrapSTT(amount) {
+    const wsttContract = tokenContracts["WSTT"];
+    console.log(`Wrapping ${ethers.formatEther(amount)} STT to WSTT...`);
+    const depositTx = await wsttContract.deposit({ value: amount, gasLimit: 100000 });
+    await depositTx.wait();
+    console.log(`Wrapped STT to WSTT: ${depositTx.hash}`);
+}
+
+async function unwrapWSTT(amount) {
+    const wsttContract = tokenContracts["WSTT"];
+    console.log(`Unwrapping ${ethers.formatUnits(amount, 18)} WSTT to STT...`);
+    const withdrawTx = await wsttContract.withdraw(amount, { gasLimit: 100000 });
+    await withdrawTx.wait();
+    console.log(`Unwrapped WSTT to STT: ${withdrawTx.hash}`);
 }
 
 async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, factory) {
@@ -176,12 +223,17 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
         throw new Error(`Insufficient ${tokenIn.symbol} balance: ${ethers.formatUnits(balance, tokenIn.decimals)} ${tokenIn.symbol}, required: ${ethers.formatUnits(amountIn, tokenIn.decimals)} ${tokenIn.symbol}`);
     }
 
+    // If swapping from STT, wrap STT to WSTT first
+    if (tokenIn.isNative) {
+        await wrapSTT(amountIn);
+        // Update tokenIn to WSTT for the swap
+        tokenInKey = "WSTT";
+    }
+
     console.log(`Swapping ${ethers.formatUnits(amountIn, tokenIn.decimals)} ${tokenIn.symbol} to ${tokenOut.symbol}...`);
 
-    // Approve token if necessary (not needed for native token)
-    if (!tokenIn.isNative) {
-        await approveToken(tokenContracts[tokenInKey], tokenIn.symbol, amountIn);
-    }
+    // Approve token (WSTT in case of STT, or the token itself otherwise)
+    await approveToken(tokenContracts[tokenInKey], TOKENS[tokenInKey].symbol, amountIn);
 
     // Prepare swap parameters
     const deadline = Math.floor(Date.now() / 1000) + 60 * 20; // 20 minutes from now
@@ -190,7 +242,7 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
 
     const wNativeToken = await quickSwapContract.WNativeToken();
     const params = {
-        tokenIn: tokenIn.isNative ? wNativeToken : tokenIn.address,
+        tokenIn: TOKENS[tokenInKey].address,
         tokenOut: tokenOut.isNative ? wNativeToken : tokenOut.address,
         deployer: poolDeployer, // Try poolDeployer first
         recipient: wallet.address,
@@ -202,21 +254,22 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
 
     console.log("Swap Parameters:", params);
 
-    // If swapping from native token (STT), include value in the transaction
-    const overrides = tokenIn.isNative ? { value: amountIn, gasLimit: 1000000 } : { gasLimit: 1000000 };
+    // No value field since we're not sending native token directly
+    const overrides = { gasLimit: 1000000 };
 
     // Perform the swap
     try {
         const swapTx = await quickSwapContract.exactInputSingle(params, overrides);
         console.log("Raw TX:", swapTx);
         const swapReceipt = await swapTx.wait();
-        console.log(`Swapped ${tokenIn.symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
+        console.log(`Swapped ${TOKENS[tokenInKey].symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
 
-        // If swapping to native token (STT), refund any remaining WSTT
+        // If swapping to STT, unwrap WSTT to STT
         if (tokenOut.isNative) {
-            const refundTx = await quickSwapContract.refundNativeToken({ gasLimit: 100000 });
-            await refundTx.wait();
-            console.log(`Refunded remaining WSTT to STT: ${refundTx.hash}`);
+            const wsttBalance = await tokenContracts["WSTT"].balanceOf(wallet.address);
+            if (wsttBalance > 0) {
+                await unwrapWSTT(wsttBalance);
+            }
         }
     } catch (error) {
         // Try again with deployer set to factory address if poolDeployer fails
@@ -226,12 +279,13 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
             console.log("Updated Swap Parameters:", params);
             const swapTx = await quickSwapContract.exactInputSingle(params, overrides);
             const swapReceipt = await swapTx.wait();
-            console.log(`Swapped ${tokenIn.symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
+            console.log(`Swapped ${TOKENS[tokenInKey].symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
 
             if (tokenOut.isNative) {
-                const refundTx = await quickSwapContract.refundNativeToken({ gasLimit: 100000 });
-                await refundTx.wait();
-                console.log(`Refunded remaining WSTT to STT: ${refundTx.hash}`);
+                const wsttBalance = await tokenContracts["WSTT"].balanceOf(wallet.address);
+                if (wsttBalance > 0) {
+                    await unwrapWSTT(wsttBalance);
+                }
             }
         } else {
             throw error;
@@ -262,6 +316,18 @@ async function performQuickSwap(tokenInKey, tokenOutKey, amountToSwap) {
 
     // Fetch contract details
     const { poolDeployer, factory } = await logContractDetails();
+
+    // Check liquidity pool
+    const tokenIn = TOKENS[tokenInKey];
+    const tokenOut = TOKENS[tokenOutKey];
+    const wNativeToken = await quickSwapContract.WNativeToken();
+    const tokenInAddress = tokenIn.isNative ? wNativeToken : tokenIn.address;
+    const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
+
+    const hasLiquidity = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress);
+    if (!hasLiquidity) {
+        throw new Error(`No liquidity pool exists for ${tokenInAddress}-${tokenOutAddress} (${tokenIn.symbol}-${tokenOut.symbol}) on QuickSwap. Please try a different token pair.`);
+    }
 
     // Perform the swap
     try {
