@@ -134,6 +134,14 @@ Enter the amount of tokens to swap (e.g., 0.1): 0.1
 Enter the number of times to swap (e.g., 2): 2
 ```
 
+#### Option 4: Quickswap (Beta)
+```bash
+Select an option (1-4): 4
+Available tokens: STT, WSTT, USDC, WETH 
+Enter the token to swap from (e.g., STT): stt
+Enter the token to swap to (e.g., WSTT): usdc
+Enter the amount of tokens to swap (e.g., 0.1): 0.1
+```
 ---
 
 ## Project Structure
