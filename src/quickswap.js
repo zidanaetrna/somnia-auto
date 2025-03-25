@@ -93,6 +93,15 @@ const quickSwapAbi = [
     },
     {
         "inputs": [],
+        "name": "factory",
+        "outputs": [
+            { "internalType": "address", "name": "", "type": "address" }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
         "name": "refundNativeToken",
         "outputs": [],
         "stateMutability": "payable",
@@ -122,25 +131,35 @@ async function logContractDetails() {
 
         const poolDeployer = await quickSwapContract.poolDeployer();
         console.log(`Pool Deployer Address: ${poolDeployer}`);
-        return poolDeployer;
+
+        const factory = await quickSwapContract.factory();
+        console.log(`Factory Address: ${factory}`);
+
+        return { poolDeployer, factory };
     } catch (error) {
         console.error("Error fetching contract details:", error.message);
-        return ethers.ZeroAddress; // Fallback to zero address if fetching fails
+        return { poolDeployer: ethers.ZeroAddress, factory: ethers.ZeroAddress };
     }
 }
 
 async function approveToken(tokenContract, tokenName, amount) {
-    const allowance = await tokenContract.allowance(wallet.address, QUICKSWAP_ADDRESS);
-    if (allowance < amount) {
-        console.log(`Approving ${tokenName}...`);
-        const maxApproval = ethers.MaxUint256;
-        const approveTx = await tokenContract.approve(QUICKSWAP_ADDRESS, maxApproval);
-        await approveTx.wait();
-        console.log(`Approved ${tokenName}: ${approveTx.hash}`);
+    try {
+        const allowance = await tokenContract.allowance(wallet.address, QUICKSWAP_ADDRESS);
+        console.log(`${tokenName} Allowance: ${ethers.formatUnits(allowance, await tokenContract.decimals())}`);
+        if (allowance < amount) {
+            console.log(`Approving ${tokenName}...`);
+            const maxApproval = ethers.MaxUint256;
+            const approveTx = await tokenContract.approve(QUICKSWAP_ADDRESS, maxApproval, { gasLimit: 100000 });
+            await approveTx.wait();
+            console.log(`Approved ${tokenName}: ${approveTx.hash}`);
+        }
+    } catch (error) {
+        console.error(`Error approving ${tokenName}:`, error);
+        throw error;
     }
 }
 
-async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer) {
+async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, factory) {
     const tokenIn = TOKENS[tokenInKey];
     const tokenOut = TOKENS[tokenOutKey];
     const amountIn = ethers.parseUnits(amountToSwap.toString(), tokenIn.decimals);
@@ -173,7 +192,7 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer) {
     const params = {
         tokenIn: tokenIn.isNative ? wNativeToken : tokenIn.address,
         tokenOut: tokenOut.isNative ? wNativeToken : tokenOut.address,
-        deployer: poolDeployer, // Use the fetched poolDeployer address
+        deployer: poolDeployer, // Try poolDeployer first
         recipient: wallet.address,
         deadline: deadline,
         amountIn: amountIn,
@@ -187,16 +206,36 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer) {
     const overrides = tokenIn.isNative ? { value: amountIn, gasLimit: 1000000 } : { gasLimit: 1000000 };
 
     // Perform the swap
-    const swapTx = await quickSwapContract.exactInputSingle(params, overrides);
-    console.log("Raw TX:", swapTx);
-    const swapReceipt = await swapTx.wait();
-    console.log(`Swapped ${tokenIn.symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
+    try {
+        const swapTx = await quickSwapContract.exactInputSingle(params, overrides);
+        console.log("Raw TX:", swapTx);
+        const swapReceipt = await swapTx.wait();
+        console.log(`Swapped ${tokenIn.symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
 
-    // If swapping to native token (STT), refund any remaining WSTT
-    if (tokenOut.isNative) {
-        const refundTx = await quickSwapContract.refundNativeToken({ gasLimit: 100000 });
-        await refundTx.wait();
-        console.log(`Refunded remaining WSTT to STT: ${refundTx.hash}`);
+        // If swapping to native token (STT), refund any remaining WSTT
+        if (tokenOut.isNative) {
+            const refundTx = await quickSwapContract.refundNativeToken({ gasLimit: 100000 });
+            await refundTx.wait();
+            console.log(`Refunded remaining WSTT to STT: ${refundTx.hash}`);
+        }
+    } catch (error) {
+        // Try again with deployer set to factory address if poolDeployer fails
+        if (error.code === 'CALL_EXCEPTION' && params.deployer !== factory) {
+            console.log("Swap failed with poolDeployer, retrying with factory address as deployer...");
+            params.deployer = factory;
+            console.log("Updated Swap Parameters:", params);
+            const swapTx = await quickSwapContract.exactInputSingle(params, overrides);
+            const swapReceipt = await swapTx.wait();
+            console.log(`Swapped ${tokenIn.symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
+
+            if (tokenOut.isNative) {
+                const refundTx = await quickSwapContract.refundNativeToken({ gasLimit: 100000 });
+                await refundTx.wait();
+                console.log(`Refunded remaining WSTT to STT: ${refundTx.hash}`);
+            }
+        } else {
+            throw error;
+        }
     }
 }
 
@@ -222,16 +261,25 @@ async function performQuickSwap(tokenInKey, tokenOutKey, amountToSwap) {
     }
 
     // Fetch contract details
-    const poolDeployer = await logContractDetails();
+    const { poolDeployer, factory } = await logContractDetails();
 
     // Perform the swap
     try {
-        await swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer);
+        await swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, factory);
     } catch (error) {
         if (error.code === 'CALL_EXCEPTION') {
             console.error("Revert Reason:", error.reason || "Unknown (check contract or network)");
             console.error("Transaction:", error.transaction);
             console.error("Receipt:", error.receipt);
+
+            // Attempt to fetch the revert reason manually
+            try {
+                const tx = error.transaction;
+                const result = await provider.call(tx, tx.blockNumber);
+                console.error("Manual Revert Reason:", result);
+            } catch (callError) {
+                console.error("Failed to fetch manual revert reason:", callError.message);
+            }
         } else {
             console.error("Unexpected Error:", error);
         }
