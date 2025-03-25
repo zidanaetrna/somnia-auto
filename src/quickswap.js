@@ -46,7 +46,8 @@ const erc20Abi = [
     "function balanceOf(address account) external view returns (uint256)",
     "function allowance(address owner, address spender) external view returns (uint256)",
     "function deposit() external payable",
-    "function withdraw(uint256 amount) external"
+    "function withdraw(uint256 amount) external",
+    "function decimals() external view returns (uint8)" // Added decimals function
 ];
 
 const quickSwapAbi = [
@@ -173,10 +174,10 @@ async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddres
     }
 }
 
-async function approveToken(tokenContract, tokenName, amount) {
+async function approveToken(tokenContract, tokenName, amount, tokenDecimals) {
     try {
         const allowance = await tokenContract.allowance(wallet.address, QUICKSWAP_ADDRESS);
-        console.log(`${tokenName} Allowance: ${ethers.formatUnits(allowance, await tokenContract.decimals())}`);
+        console.log(`${tokenName} Allowance: ${ethers.formatUnits(allowance, tokenDecimals)}`);
         if (allowance < amount) {
             console.log(`Approving ${tokenName}...`);
             const maxApproval = ethers.MaxUint256;
@@ -230,10 +231,10 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
         tokenInKey = "WSTT";
     }
 
-    console.log(`Swapping ${ethers.formatUnits(amountIn, tokenIn.decimals)} ${tokenIn.symbol} to ${tokenOut.symbol}...`);
+    console.log(`Swapping ${ethers.formatUnits(amountIn, tokenIn.decimals)} ${TOKENS[tokenInKey].symbol} to ${tokenOut.symbol}...`);
 
     // Approve token (WSTT in case of STT, or the token itself otherwise)
-    await approveToken(tokenContracts[tokenInKey], TOKENS[tokenInKey].symbol, amountIn);
+    await approveToken(tokenContracts[tokenInKey], TOKENS[tokenInKey].symbol, amountIn, TOKENS[tokenInKey].decimals);
 
     // Prepare swap parameters
     const deadline = Math.floor(Date.now() / 1000) + 60 * 20; // 20 minutes from now
@@ -334,7 +335,7 @@ async function performQuickSwap(tokenInKey, tokenOutKey, amountToSwap) {
         await swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, factory);
     } catch (error) {
         if (error.code === 'CALL_EXCEPTION') {
-            console.error("Revert Reason:", error.reason || "Unknown (check contract or network)");
+            console.error("Revert Reason:", error.reason || "Previous revert reason: Not WNativeToken (check contract or network)");
             console.error("Transaction:", error.transaction);
             console.error("Receipt:", error.receipt);
 
