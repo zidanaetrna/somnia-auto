@@ -91,7 +91,6 @@ const factoryAbi = [
     }
 ];
 
-// Adjusted pool ABI based on returned data
 const poolAbi = [
     "function globalState() external view returns (uint160 price, int24 tick, uint16 feeZto, uint16 feeOtz, uint16 timepointIndex, uint8 communityFee)"
 ];
@@ -141,7 +140,7 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
     if (!poolAddress) throw new Error("No pool found");
     const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
     const globalState = await poolContract.globalState();
-    const sqrtPriceX96 = globalState[0]; // price field
+    const sqrtPriceX96 = globalState[0];
     console.log(`Pool sqrtPriceX96: ${sqrtPriceX96.toString()}`);
     if (sqrtPriceX96 === 0n) {
         throw new Error("Pool has no liquidity (sqrtPriceX96 = 0)");
@@ -151,10 +150,25 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
 
 async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress, amountIn, tokenInDecimals, tokenOutDecimals) {
     const { sqrtPriceX96 } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
-    // Price = (sqrtPriceX96)^2 / 2^192, adjusted for decimals
-    const price = (sqrtPriceX96 * sqrtPriceX96 * BigInt(10 ** tokenOutDecimals)) / (BigInt(2) ** BigInt(192) * BigInt(10 ** tokenInDecimals));
-    const amountOut = (amountIn * price) / BigInt(10 ** tokenInDecimals);
-    console.log(`Calculated Price (${TOKENS[tokenInAddress === TOKENS.WSTT.address ? "WSTT" : "USDC"].symbol}/${TOKENS[tokenOutAddress === TOKENS.USDC.address ? "USDC" : "WSTT"].symbol}): ${ethers.formatUnits(price, tokenOutDecimals)}`);
+    const sqrtPriceX96Big = BigInt(sqrtPriceX96);
+    // Price in Q64.96: price = (sqrtPriceX96^2 / 2^192)
+    const priceRaw = (sqrtPriceX96Big * sqrtPriceX96Big) / (BigInt(2) ** BigInt(192));
+    
+    // Adjust for token decimals and order
+    let price;
+    if (tokenInAddress < tokenOutAddress) {
+        // tokenIn = token0 (WSTT), tokenOut = token1 (USDC), priceRaw is token0/token1 (WSTT/USDC)
+        // We need USDC/WSTT, so invert and adjust decimals
+        price = (BigInt(10 ** tokenInDecimals) * BigInt(10 ** tokenOutDecimals)) / priceRaw;
+        console.log(`Calculated Price (USDC/WSTT): ${ethers.formatUnits(price, tokenOutDecimals)}`);
+    } else {
+        // tokenIn = token1, tokenOut = token0, priceRaw is token0/token1, no inversion needed
+        price = priceRaw * BigInt(10 ** tokenOutDecimals) / BigInt(10 ** tokenInDecimals);
+        console.log(`Calculated Price (WSTT/USDC): ${ethers.formatUnits(price, tokenOutDecimals)}`);
+    }
+
+    // Calculate amountOut = amountIn * (USDC/WSTT price)
+    const amountOut = (amountIn * BigInt(10 ** tokenOutDecimals)) / price;
     return amountOut;
 }
 
@@ -222,10 +236,10 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
     const expectedOut = await getExpectedOutput(factory, tokenInAddress, tokenOutAddress, amountIn, TOKENS[tokenInKeyForSwap].decimals, tokenOut.decimals);
-    const slippageTolerance = 0.95; // 5% slippage
+    const slippageTolerance = 0.995; // 0.5% slippage
     const amountOutMinimum = BigInt(Math.floor(Number(expectedOut) * slippageTolerance));
     console.log(`Expected Output: ${ethers.formatUnits(expectedOut, tokenOut.decimals)} ${tokenOut.symbol}`);
-    console.log(`amountOutMinimum with 5% slippage: ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
+    console.log(`amountOutMinimum with 0.5% slippage: ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
 
     const params = {
         tokenIn: tokenInAddress,
