@@ -151,24 +151,26 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
 async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress, amountIn, tokenInDecimals, tokenOutDecimals) {
     const { sqrtPriceX96 } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
     const sqrtPriceX96Big = BigInt(sqrtPriceX96);
-    // Price in Q64.96: price = (sqrtPriceX96^2 / 2^192)
+    // Raw price in Q64.96: price = (sqrtPriceX96^2 / 2^192)
     const priceRaw = (sqrtPriceX96Big * sqrtPriceX96Big) / (BigInt(2) ** BigInt(192));
-    
-    // Adjust for token decimals and order
+
     let price;
     if (tokenInAddress < tokenOutAddress) {
         // tokenIn = token0 (WSTT), tokenOut = token1 (USDC), priceRaw is token0/token1 (WSTT/USDC)
-        // We need USDC/WSTT, so invert and adjust decimals
-        price = (BigInt(10 ** tokenInDecimals) * BigInt(10 ** tokenOutDecimals)) / priceRaw;
-        console.log(`Calculated Price (USDC/WSTT): ${ethers.formatUnits(price, tokenOutDecimals)}`);
-    } else {
-        // tokenIn = token1, tokenOut = token0, priceRaw is token0/token1, no inversion needed
         price = priceRaw * BigInt(10 ** tokenOutDecimals) / BigInt(10 ** tokenInDecimals);
         console.log(`Calculated Price (WSTT/USDC): ${ethers.formatUnits(price, tokenOutDecimals)}`);
+    } else {
+        // tokenIn = token1, tokenOut = token0, priceRaw is token0/token1, invert for token1/token0
+        price = (BigInt(10 ** tokenInDecimals) * BigInt(10 ** tokenOutDecimals)) / priceRaw;
+        console.log(`Calculated Price (USDC/WSTT): ${ethers.formatUnits(price, tokenOutDecimals)}`);
     }
 
-    // Calculate amountOut = amountIn * (USDC/WSTT price)
-    const amountOut = (amountIn * BigInt(10 ** tokenOutDecimals)) / price;
+    if (price === 0n) {
+        throw new Error("Calculated price is zero, cannot proceed with swap");
+    }
+
+    // amountOut = amountIn * price (WSTT/USDC) for tokenIn < tokenOut
+    const amountOut = (amountIn * price) / BigInt(10 ** tokenInDecimals);
     return amountOut;
 }
 
