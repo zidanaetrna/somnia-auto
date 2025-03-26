@@ -7,7 +7,6 @@ const wallet = new ethers.Wallet(process.env.MAIN_PRIVATE_KEY, provider);
 const QUICKSWAP_ADDRESS = "0xE94de02e52Eaf9F0f6Bf7f16E4927FcBc2c09bC7"; // QuickSwap router contract address
 const FEE_TIER = parseInt(process.env.FEE_TIER) || 500;
 const MIN_GAS_BALANCE = process.env.MIN_GAS_BALANCE || "0.01";
-const SLIPPAGE_TOLERANCE = 0.95; // 5% slippage tolerance
 
 // Token addresses
 const TOKENS = {
@@ -152,11 +151,6 @@ const factoryAbi = [
     }
 ];
 
-// Pool ABI to fetch price (simplified)
-const poolAbi = [
-    "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)"
-];
-
 const quickSwapContract = new ethers.Contract(QUICKSWAP_ADDRESS, quickSwapAbi, wallet);
 
 // Create token contracts for non-native tokens
@@ -200,28 +194,6 @@ async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddres
     } catch (error) {
         console.error("Error checking liquidity pool:", error.message);
         return null;
-    }
-}
-
-// Estimate the output amount for slippage protection
-async function estimateOutputAmount(poolAddress, tokenInAddress, tokenOutAddress, amountIn) {
-    try {
-        const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
-        const slot0 = await poolContract.slot0();
-        const sqrtPriceX96 = slot0.sqrtPriceX96;
-
-        // Simplified price calculation (sqrtPriceX96^2 / 2^192)
-        const price = (sqrtPriceX96 * sqrtPriceX96) / (BigInt(1) << 192n);
-        const amountOut = (amountIn * price) / (BigInt(10) ** BigInt(18)); // Adjust for decimals (simplified)
-        const amountOutMinimum = (amountOut * BigInt(Math.floor(SLIPPAGE_TOLERANCE * 1000))) / BigInt(1000);
-
-        console.log(`Estimated Output (before slippage): ${ethers.formatUnits(amountOut, 18)} WETH`);
-        console.log(`Amount Out Minimum (with ${100 - SLIPPAGE_TOLERANCE * 100}% slippage): ${ethers.formatUnits(amountOutMinimum, 18)} WETH`);
-
-        return amountOutMinimum;
-    } catch (error) {
-        console.error("Error estimating output amount:", error.message);
-        return BigInt(0);
     }
 }
 
@@ -293,12 +265,17 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
     const tokenInAddress = TOKENS[tokenInKeyForSwap].address;
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
-    // Check liquidity and estimate output
-    const poolAddress = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress);
+    // Set a default amountOutMinimum based on tokenOut
     let amountOutMinimum = BigInt(0);
-    if (poolAddress) {
-        amountOutMinimum = await estimateOutputAmount(poolAddress, tokenInAddress, tokenOutAddress, amountIn);
+    if (tokenOutKey === "USDC") {
+        // Based on the manual swap, 0.1 WSTT = 1 USDC, so set a conservative minimum (e.g., 0.5 USDC)
+        amountOutMinimum = ethers.parseUnits("0.5", TOKENS[tokenOutKey].decimals);
+    } else if (tokenOutKey === "WETH") {
+        // Conservative estimate for WETH (e.g., 0.0001 WETH)
+        amountOutMinimum = ethers.parseUnits("0.0001", TOKENS[tokenOutKey].decimals);
     }
+
+    console.log(`Setting amountOutMinimum to: ${ethers.formatUnits(amountOutMinimum, TOKENS[tokenOutKey].decimals)} ${tokenOut.symbol}`);
 
     const params = {
         tokenIn: tokenInAddress,
@@ -330,7 +307,7 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
             }
         }
     } catch (error) {
-        if (error.code === 'CALL_EXCEPTION') {
+        if (error.code === 'CALL_EXCEPTION' && tokenOutKey === "WETH") {
             console.log("Single-hop swap failed, trying multi-hop swap (WSTT -> USDC -> WETH)...");
 
             // Check liquidity for multi-hop path
@@ -353,7 +330,7 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
                 recipient: wallet.address,
                 deadline: deadline,
                 amountIn: amountIn,
-                amountOutMinimum: BigInt(0) // Simplified for now
+                amountOutMinimum: amountOutMinimum
             };
 
             console.log("Multi-Hop Swap Parameters:", multiHopParams);
@@ -448,7 +425,7 @@ async function performQuickSwap(tokenInKey, tokenOutKey, amountToSwap) {
         }
     } catch (error) {
         if (error.code === 'CALL_EXCEPTION') {
-            console.error("Revert Reason:", error.reason || "Previous revert reason: Not WNativeToken (check contract or network)");
+            console.error("Revert Reason:", error.reason || "Unknown revert reason");
             console.error("Transaction:", error.transaction);
             console.error("Receipt:", error.receipt);
 
