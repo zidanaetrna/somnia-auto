@@ -5,7 +5,7 @@ const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 const wallet = new ethers.Wallet(process.env.MAIN_PRIVATE_KEY, provider);
 
 const QUICKSWAP_ADDRESS = "0xE94de02e52Eaf9F0f6Bf7f16E4927FcBc2c09bC7";
-const FEE_TIER = parseInt(process.env.FEE_TIER) || 500; // Assuming 0.05% fee tier
+const FEE_TIER = parseInt(process.env.FEE_TIER) || 500;
 const MIN_GAS_BALANCE = process.env.MIN_GAS_BALANCE || "0.01";
 
 const TOKENS = {
@@ -91,9 +91,9 @@ const factoryAbi = [
     }
 ];
 
-// Algebra V3 pool ABI (subset relevant for price fetching)
+// Adjusted pool ABI based on returned data
 const poolAbi = [
-    "function globalState() external view returns (uint160 price, int24 tick, uint16 feeZto, uint16 feeOtz, uint16 timepointIndex, uint8 communityFeeToken0, uint8 communityFeeToken1, bool unlocked)"
+    "function globalState() external view returns (uint160 price, int24 tick, uint16 feeZto, uint16 feeOtz, uint16 timepointIndex, uint8 communityFee)"
 ];
 
 const quickSwapContract = new ethers.Contract(QUICKSWAP_ADDRESS, quickSwapAbi, wallet);
@@ -141,7 +141,7 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
     if (!poolAddress) throw new Error("No pool found");
     const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
     const globalState = await poolContract.globalState();
-    const sqrtPriceX96 = globalState[0]; // price field in Algebra's globalState
+    const sqrtPriceX96 = globalState[0]; // price field
     console.log(`Pool sqrtPriceX96: ${sqrtPriceX96.toString()}`);
     if (sqrtPriceX96 === 0n) {
         throw new Error("Pool has no liquidity (sqrtPriceX96 = 0)");
@@ -151,9 +151,8 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
 
 async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress, amountIn, tokenInDecimals, tokenOutDecimals) {
     const { sqrtPriceX96 } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
-    // Algebra uses sqrtPriceX96 (same as Uniswap V3): price = (sqrtPriceX96)^2 / 2^192
+    // Price = (sqrtPriceX96)^2 / 2^192, adjusted for decimals
     const price = (sqrtPriceX96 * sqrtPriceX96 * BigInt(10 ** tokenOutDecimals)) / (BigInt(2) ** BigInt(192) * BigInt(10 ** tokenInDecimals));
-    // Amount out = amountIn * price (adjusted for decimals)
     const amountOut = (amountIn * price) / BigInt(10 ** tokenInDecimals);
     console.log(`Calculated Price (${TOKENS[tokenInAddress === TOKENS.WSTT.address ? "WSTT" : "USDC"].symbol}/${TOKENS[tokenOutAddress === TOKENS.USDC.address ? "USDC" : "WSTT"].symbol}): ${ethers.formatUnits(price, tokenOutDecimals)}`);
     return amountOut;
