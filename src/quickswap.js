@@ -151,20 +151,20 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
 async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress, amountIn, tokenInDecimals, tokenOutDecimals) {
     const { sqrtPriceX96 } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
     const sqrtPriceX96Big = BigInt(sqrtPriceX96);
-    // Raw price in Q64.96: price = (sqrtPriceX96^2 / 2^192)
-    const numerator = sqrtPriceX96Big * sqrtPriceX96Big;
-    const denominator = BigInt(2) ** BigInt(192);
+    // Scale numerator before division to avoid underflow
+    const numerator = sqrtPriceX96Big * sqrtPriceX96Big * BigInt(10 ** tokenOutDecimals);
+    const denominator = BigInt(2) ** BigInt(192) * BigInt(10 ** tokenInDecimals);
     const priceRaw = numerator / denominator;
 
     let price;
     if (tokenInAddress < tokenOutAddress) {
         // tokenIn = token0 (WSTT), tokenOut = token1 (USDC), priceRaw is token0/token1 (WSTT/USDC)
-        // We need USDC/WSTT, so invert priceRaw and adjust decimals
-        price = (BigInt(10 ** (tokenInDecimals + tokenOutDecimals)) / priceRaw) / BigInt(10 ** tokenInDecimals);
+        // Invert to get USDC/WSTT
+        price = (BigInt(10 ** tokenOutDecimals) * BigInt(10 ** tokenInDecimals)) / priceRaw;
         console.log(`Calculated Price (USDC/WSTT): ${ethers.formatUnits(price, tokenOutDecimals)}`);
     } else {
         // tokenIn = token1, tokenOut = token0, priceRaw is token0/token1
-        price = priceRaw * BigInt(10 ** tokenOutDecimals) / BigInt(10 ** tokenInDecimals);
+        price = priceRaw;
         console.log(`Calculated Price (WSTT/USDC): ${ethers.formatUnits(price, tokenOutDecimals)}`);
     }
 
