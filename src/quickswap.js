@@ -151,20 +151,22 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
 async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress, amountIn, tokenInDecimals, tokenOutDecimals) {
     const { sqrtPriceX96 } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
     const sqrtPriceX96Big = BigInt(sqrtPriceX96);
-    // Scale numerator before division to avoid underflow
-    const numerator = sqrtPriceX96Big * sqrtPriceX96Big * BigInt(10 ** tokenOutDecimals);
-    const denominator = BigInt(2) ** BigInt(192) * BigInt(10 ** tokenInDecimals);
-    const priceRaw = numerator / denominator;
+    // Compute price with full precision: sqrtPriceX96^2 * 10^decimalsOut / (2^192 * 10^decimalsIn)
+    const numerator = sqrtPriceX96Big * sqrtPriceX96Big * BigInt(10 ** (tokenOutDecimals + tokenInDecimals));
+    const denominator = (BigInt(2) ** BigInt(192)) * BigInt(10 ** tokenInDecimals);
 
     let price;
     if (tokenInAddress < tokenOutAddress) {
-        // tokenIn = token0 (WSTT), tokenOut = token1 (USDC), priceRaw is token0/token1 (WSTT/USDC)
-        // Invert to get USDC/WSTT
-        price = (BigInt(10 ** tokenOutDecimals) * BigInt(10 ** tokenInDecimals)) / priceRaw;
+        // tokenIn = token0 (WSTT), tokenOut = token1 (USDC), raw is token0/token1 (WSTT/USDC)
+        // Invert to USDC/WSTT
+        if (numerator === 0n) {
+            throw new Error("Numerator is zero, cannot calculate price");
+        }
+        price = denominator / numerator; // USDC/WSTT
         console.log(`Calculated Price (USDC/WSTT): ${ethers.formatUnits(price, tokenOutDecimals)}`);
     } else {
-        // tokenIn = token1, tokenOut = token0, priceRaw is token0/token1
-        price = priceRaw;
+        // tokenIn = token1, tokenOut = token0, raw is token0/token1
+        price = numerator / denominator; // WSTT/USDC
         console.log(`Calculated Price (WSTT/USDC): ${ethers.formatUnits(price, tokenOutDecimals)}`);
     }
 
