@@ -92,7 +92,9 @@ const factoryAbi = [
 ];
 
 const poolAbi = [
-    "function globalState() external view returns (uint160 price, int24 tick, uint16 feeZto, uint16 feeOtz, uint16 timepointIndex, uint8 communityFee)"
+    "function globalState() external view returns (uint160 price, int24 tick, uint16 feeZto, uint16 feeOtz, uint16 timepointIndex, uint8 communityFee)",
+    "function fee() external view returns (uint24)",
+    "function liquidity() external view returns (uint128)"
 ];
 
 const quickSwapContract = new ethers.Contract(QUICKSWAP_ADDRESS, quickSwapAbi, wallet);
@@ -140,25 +142,29 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
     if (!poolAddress) throw new Error("No pool found");
     const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
     const globalState = await poolContract.globalState();
+    const fee = await poolContract.fee();
+    const liquidity = await poolContract.liquidity();
     const sqrtPriceX96 = globalState[0];
     console.log(`Pool sqrtPriceX96: ${sqrtPriceX96.toString()}`);
+    console.log(`Pool Fee Tier: ${fee} (bps)`);
+    console.log(`Pool Liquidity: ${liquidity.toString()}`);
+    const usdcBalance = await tokenContracts["USDC"].balanceOf(poolAddress);
+    console.log(`USDC Balance in Pool: ${ethers.formatUnits(usdcBalance, 6)} USDC`);
     if (sqrtPriceX96 === 0n) {
         throw new Error("Pool has no liquidity (sqrtPriceX96 = 0)");
     }
-    return { poolAddress, sqrtPriceX96 };
+    return { poolAddress, sqrtPriceX96, fee };
 }
 
 async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress, amountIn, tokenInDecimals, tokenOutDecimals) {
-    const { sqrtPriceX96 } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
+    const { sqrtPriceX96, fee } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
     const sqrtPriceX96Big = BigInt(sqrtPriceX96);
-    // Compute price with full precision: sqrtPriceX96^2 * 10^decimalsOut / (2^192 * 10^decimalsIn)
     const numerator = sqrtPriceX96Big * sqrtPriceX96Big * BigInt(10 ** (tokenOutDecimals + tokenInDecimals));
     const denominator = (BigInt(2) ** BigInt(192)) * BigInt(10 ** tokenInDecimals);
 
     let price;
     if (tokenInAddress < tokenOutAddress) {
         // tokenIn = token0 (WSTT), tokenOut = token1 (USDC), raw is token0/token1 (WSTT/USDC)
-        // Invert to USDC/WSTT
         if (numerator === 0n) {
             throw new Error("Numerator is zero, cannot calculate price");
         }
@@ -174,8 +180,9 @@ async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress
         throw new Error("Calculated price is zero, cannot proceed with swap");
     }
 
-    // amountOut = amountIn * (USDC/WSTT price) / 10^tokenInDecimals
-    const amountOut = (amountIn * price) / BigInt(10 ** tokenInDecimals);
+    // Adjust for fee
+    const feeMultiplier = BigInt(10000 - fee); // e.g., 9950 for 500 bps
+    const amountOut = (amountIn * price * feeMultiplier) / (BigInt(10000) * BigInt(10 ** tokenInDecimals));
     return amountOut;
 }
 
@@ -243,10 +250,10 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
     const expectedOut = await getExpectedOutput(factory, tokenInAddress, tokenOutAddress, amountIn, TOKENS[tokenInKeyForSwap].decimals, tokenOut.decimals);
-    const slippageTolerance = 0.995; // 0.5% slippage
+    const slippageTolerance = 0.5; // 50% slippage to test
     const amountOutMinimum = BigInt(Math.floor(Number(expectedOut) * slippageTolerance));
     console.log(`Expected Output: ${ethers.formatUnits(expectedOut, tokenOut.decimals)} ${tokenOut.symbol}`);
-    console.log(`amountOutMinimum with 0.5% slippage: ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
+    console.log(`amountOutMinimum with 50% slippage: ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
 
     const params = {
         tokenIn: tokenInAddress,
@@ -276,57 +283,21 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
             }
         }
     } catch (error) {
-        if (error.code === 'CALL_EXCEPTION' && tokenOutKey === "WETH") {
-            console.log("Single-hop swap failed, trying multi-hop swap (WSTT -> USDC -> WETH)...");
-            const pool1 = await checkLiquidityPool(factory, TOKENS["WSTT"].address, TOKENS["USDC"].address);
-            const pool2 = await checkLiquidityPool(factory, TOKENS["USDC"].address, TOKENS["WETH"].address);
-            if (!pool1 || !pool2) {
-                throw new Error("No liquidity pool exists for multi-hop path (WSTT -> USDC -> WETH)");
-            }
-
-            const path = ethers.solidityPacked(
-                ["address", "address", "address"],
-                [TOKENS["WSTT"].address, TOKENS["USDC"].address, TOKENS["WETH"].address]
-            );
-
-            const multiHopParams = {
-                path: path,
-                recipient: wallet.address,
-                deadline: deadline,
-                amountIn: amountIn,
-                amountOutMinimum: amountOutMinimum
-            };
-
-            try {
-                const swapTx = await quickSwapContract.exactInput(multiHopParams, overrides);
-                const swapReceipt = await swapTx.wait();
-                console.log(`Swapped ${TOKENS[tokenInKeyForSwap].symbol} to ${tokenOut.symbol} via multi-hop: ${swapTx.hash}`);
-                if (tokenOut.isNative) {
-                    const wsttBalance = await tokenContracts["WSTT"].balanceOf(wallet.address);
-                    if (wsttBalance > 0) {
-                        await unwrapWSTT(wsttBalance);
-                    }
-                }
-            } catch (multiHopError) {
-                if (multiHopError.code === 'CALL_EXCEPTION' && params.deployer !== factory) {
-                    console.log("Multi-hop swap failed with poolDeployer, retrying with factory address...");
-                    multiHopParams.deployer = factory;
-                    const swapTx = await quickSwapContract.exactInput(multiHopParams, overrides);
-                    const swapReceipt = await swapTx.wait();
-                    console.log(`Swapped ${TOKENS[tokenInKeyForSwap].symbol} to ${tokenOut.symbol} via multi-hop: ${swapTx.hash}`);
-                    if (tokenOut.isNative) {
-                        const wsttBalance = await tokenContracts["WSTT"].balanceOf(wallet.address);
-                        if (wsttBalance > 0) {
-                            await unwrapWSTT(wsttBalance);
-                        }
-                    }
-                } else {
-                    throw multiHopError;
+        if (error.code === 'CALL_EXCEPTION') {
+            console.error("Revert Reason:", error.reason || "Unknown revert reason");
+            if (error.data && error.data !== "0x") {
+                try {
+                    const decodedError = ethers.AbiCoder.defaultAbiCoder().decode(["string"], `0x${error.data.slice(10)}`);
+                    console.error("Decoded Revert Reason:", decodedError[0]);
+                } catch (decodeError) {
+                    console.error("Failed to decode revert reason:", decodeError.message);
+                    console.error("Raw Revert Data:", error.data);
                 }
             }
-        } else {
-            throw error;
+            console.error("Transaction:", error.transaction);
+            console.error("Receipt:", error.receipt);
         }
+        throw error;
     }
 }
 
@@ -377,21 +348,7 @@ async function performQuickSwap(tokenInKey, tokenOutKey, amountToSwap) {
             }
         }
     } catch (error) {
-        if (error.code === 'CALL_EXCEPTION') {
-            console.error("Revert Reason:", error.reason || "Unknown revert reason");
-            if (error.data) {
-                try {
-                    const decodedError = ethers.AbiCoder.defaultAbiCoder().decode(["string"], `0x${error.data.slice(10)}`);
-                    console.error("Decoded Revert Reason:", decodedError[0]);
-                } catch (decodeError) {
-                    console.error("Failed to decode revert reason:", decodeError.message);
-                }
-            }
-            console.error("Transaction:", error.transaction);
-            console.error("Receipt:", error.receipt);
-        } else {
-            console.error("Unexpected Error:", error);
-        }
+        console.error("Swap failed:", error);
         throw error;
     }
 }
