@@ -159,19 +159,20 @@ async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress
     let price;
     if (tokenInAddress < tokenOutAddress) {
         // tokenIn = token0 (WSTT), tokenOut = token1 (USDC), priceRaw is token0/token1 (WSTT/USDC)
-        price = (priceRaw * BigInt(10 ** tokenOutDecimals)) / BigInt(10 ** tokenInDecimals);
-        console.log(`Calculated Price (WSTT/USDC): ${ethers.formatUnits(price, tokenOutDecimals)}`);
-    } else {
-        // tokenIn = token1, tokenOut = token0, priceRaw is token0/token1, invert for token1/token0
-        price = (BigInt(10 ** tokenInDecimals) * BigInt(10 ** tokenOutDecimals)) / priceRaw;
+        // We need USDC/WSTT, so invert priceRaw and adjust decimals
+        price = (BigInt(10 ** (tokenInDecimals + tokenOutDecimals)) / priceRaw) / BigInt(10 ** tokenInDecimals);
         console.log(`Calculated Price (USDC/WSTT): ${ethers.formatUnits(price, tokenOutDecimals)}`);
+    } else {
+        // tokenIn = token1, tokenOut = token0, priceRaw is token0/token1
+        price = priceRaw * BigInt(10 ** tokenOutDecimals) / BigInt(10 ** tokenInDecimals);
+        console.log(`Calculated Price (WSTT/USDC): ${ethers.formatUnits(price, tokenOutDecimals)}`);
     }
 
     if (price === 0n) {
         throw new Error("Calculated price is zero, cannot proceed with swap");
     }
 
-    // For WSTT -> USDC (tokenIn < tokenOut), amountOut = amountIn * (WSTT/USDC price)
+    // amountOut = amountIn * (USDC/WSTT price) / 10^tokenInDecimals
     const amountOut = (amountIn * price) / BigInt(10 ** tokenInDecimals);
     return amountOut;
 }
