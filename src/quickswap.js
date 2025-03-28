@@ -242,8 +242,12 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
     const tokenInAddress = TOKENS[tokenInKeyForSwap].address;
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
+    // Log pool details before swap
+    const { sqrtPriceX96, fee } = await checkPoolLiquidity(factory, tokenInAddress, tokenOutAddress, tokenOut.decimals);
+    console.log(`Pool Fee (actual): ${fee} bps, Expected: ${FEE_TIER} bps`);
+
     const expectedOut = await getExpectedOutput(factory, tokenInAddress, tokenOutAddress, amountIn, TOKENS[tokenInKeyForSwap].decimals, tokenOut.decimals);
-    const slippageTolerance = 0.005; // 0.5% to match manual swap
+    const slippageTolerance = 0.005; // 0.5%
     const manualAmountOutMinimum = ethers.parseUnits("0.014544", tokenOut.decimals);
     const amountOutMinimum = manualAmountOutMinimum;
     console.log(`Expected Output (calculated): ${ethers.formatUnits(expectedOut, tokenOut.decimals)} ${tokenOut.symbol}`);
