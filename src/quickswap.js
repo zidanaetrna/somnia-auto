@@ -303,29 +303,52 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
 
 async function performQuickSwap(wallet, tokenIn, tokenOut, amountIn, provider) {
     try {
-        // Make sure amountIn is BigInt
-        if (typeof amountIn !== 'bigint') {
-            amountIn = BigInt(amountIn);
+        // Validate inputs
+        if (!wallet || !tokenIn || !tokenOut || !provider) {
+            throw new Error('Missing required parameters');
         }
 
-        // Get token contracts
+        // Ensure amountIn is defined and convert to BigInt
+        if (amountIn === undefined) {
+            throw new Error('Amount to swap is undefined');
+        }
+        const amountInBigInt = typeof amountIn === 'bigint' ? amountIn : BigInt(amountIn);
+
+        // Get token contracts with proper error handling
         const tokenInContract = new ethers.Contract(tokenIn, TOKEN_ABI, provider);
         const tokenOutContract = new ethers.Contract(tokenOut, TOKEN_ABI, provider);
 
-        // Check balances
-        const balanceIn = await tokenInContract.balanceOf(wallet.address);
-        console.log(`${tokenIn} Balance: ${ethers.formatUnits(balanceIn, await tokenInContract.decimals())}`);
-
-        if (balanceIn < amountIn) {
-            throw new Error(`Insufficient balance. You only have ${ethers.formatUnits(balanceIn, await tokenInContract.decimals())}`);
+        // Check balances with error handling
+        let balanceIn;
+        try {
+            balanceIn = await tokenInContract.balanceOf(wallet.address);
+        } catch (e) {
+            throw new Error(`Failed to get balance for ${tokenIn}: ${e.message}`);
         }
 
-        // Approve token if needed
-        const allowance = await tokenInContract.allowance(wallet.address, TOKEN_ADDRESSES.ROUTER);
-        if (allowance < amountIn) {
+        const tokenInDecimals = await tokenInContract.decimals();
+        console.log(`${tokenIn} Balance: ${ethers.formatUnits(balanceIn, tokenInDecimals)}`);
+
+        if (balanceIn < amountInBigInt) {
+            throw new Error(`Insufficient balance. You only have ${ethers.formatUnits(balanceIn, tokenInDecimals)} ${tokenIn}`);
+        }
+
+        // Check allowance
+        let allowance;
+        try {
+            allowance = await tokenInContract.allowance(wallet.address, TOKEN_ADDRESSES.ROUTER);
+        } catch (e) {
+            throw new Error(`Failed to check allowance: ${e.message}`);
+        }
+
+        if (allowance < amountInBigInt) {
             console.log('Approving token...');
-            const approveTx = await tokenInContract.approve(TOKEN_ADDRESSES.ROUTER, amountIn);
-            await approveTx.wait();
+            try {
+                const approveTx = await tokenInContract.approve(TOKEN_ADDRESSES.ROUTER, amountInBigInt);
+                await approveTx.wait();
+            } catch (e) {
+                throw new Error(`Token approval failed: ${e.message}`);
+            }
         }
 
         // Perform swap
@@ -337,28 +360,33 @@ async function performQuickSwap(wallet, tokenIn, tokenOut, amountIn, provider) {
             fee: 3000, // 0.3% fee tier
             recipient: wallet.address,
             deadline: Math.floor(Date.now() / 1000) + 60 * 20, // 20 minutes
-            amountIn: amountIn,
-            amountOutMinimum: 0, // You might want to calculate a minimum
+            amountIn: amountInBigInt,
+            amountOutMinimum: 0, // Consider calculating a minimum here
             sqrtPriceLimitX96: 0,
         };
 
         console.log('Executing swap...');
-        const swapTx = await routerContract.exactInputSingle(params, {
-            gasLimit: CONFIG.GAS_LIMIT,
-            gasPrice: ethers.parseUnits(CONFIG.GAS_MAX_GWEI.toString(), 'gwei'),
-        });
+        try {
+            const swapTx = await routerContract.exactInputSingle(params, {
+                gasLimit: CONFIG.GAS_LIMIT,
+                gasPrice: ethers.parseUnits(CONFIG.GAS_MAX_GWEI.toString(), 'gwei'),
+            });
 
-        const receipt = await swapTx.wait();
-        console.log(`Swap completed: ${receipt.transactionHash}`);
+            const receipt = await swapTx.wait();
+            console.log(`Swap completed: ${receipt.transactionHash}`);
 
-        // Check new balance
-        const newBalance = await tokenOutContract.balanceOf(wallet.address);
-        console.log(`New ${tokenOut} balance: ${ethers.formatUnits(newBalance, await tokenOutContract.decimals())}`);
+            // Check new balance
+            const newBalance = await tokenOutContract.balanceOf(wallet.address);
+            const tokenOutDecimals = await tokenOutContract.decimals();
+            console.log(`New ${tokenOut} balance: ${ethers.formatUnits(newBalance, tokenOutDecimals)}`);
 
-        return receipt;
+            return receipt;
+        } catch (e) {
+            throw new Error(`Swap execution failed: ${e.message}`);
+        }
     } catch (error) {
-        console.error('Error in performQuickSwap:', error);
-        throw error;
+        console.error('Error in performQuickSwap:', error.message);
+        throw error; // Re-throw to handle in calling function
     }
 }
 
