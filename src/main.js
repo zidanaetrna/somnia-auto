@@ -1,11 +1,23 @@
 require('dotenv').config();
 const readline = require('readline');
+const ethers = require('ethers');
 const { performSwap } = require('./swap');
 const { startBot } = require('./auto');
 const { performQuickSwap } = require('./quickswap');
 
 const PROJECT_NAME = process.env.PROJECT_NAME || "Somnia";
 const CREATOR_NAME = process.env.CREATOR_NAME || "aetrna";
+
+// Initialize provider and wallet
+const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+const wallet = new ethers.Wallet(process.env.MAIN_PRIVATE_KEY, provider);
+
+const TOKENS = {
+    STT: { address: null, symbol: "STT", decimals: 18, isNative: true },
+    WSTT: { address: "0x4A3BC48C156384f9564Fd65A53a2f3D534D8f2b7", symbol: "WSTT", decimals: 18, isNative: false },
+    USDC: { address: "0xE9CC37904875B459Fa5D0FE37680d36F1ED55e38", symbol: "USDC", decimals: 6, isNative: false },
+    WETH: { address: "0xd2480162Aa7F02Ead7BF4C127465446150D58452", symbol: "WETH", decimals: 18, isNative: false }
+};
 
 const rl = readline.createInterface({
     input: process.stdin,
@@ -147,7 +159,10 @@ async function getUserInput() {
     } else if (choice === 4) {
         // Swap via QuickSwap
         console.log(`\nPerforming QuickSwap: ${tokenInKey} to ${tokenOutKey}`);
-        await performQuickSwap(tokenInKey, tokenOutKey, amountToSwap);
+        const tokenIn = TOKENS[tokenInKey].address; // Get address from TOKENS
+        const tokenOut = TOKENS[tokenOutKey].address; // Get address from TOKENS
+        const amountIn = ethers.parseUnits(amountToSwap.toString(), TOKENS[tokenInKey].decimals); // Convert to BigInt with decimals
+        await performQuickSwap(wallet, tokenIn, tokenOut, amountIn, provider);
         rl.close();
     }
 })();
