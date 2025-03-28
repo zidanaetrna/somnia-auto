@@ -138,18 +138,21 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
 async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress, amountIn, tokenInDecimals, tokenOutDecimals) {
     const { sqrtPriceX96, fee } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
     const sqrtPriceX96Big = BigInt(sqrtPriceX96);
-    // sqrtPriceX96 is price of tokenIn/tokenOut, so for WSTT -> USDC, we invert it
-    const priceX96 = (BigInt(2) ** BigInt(192) * BigInt(10 ** tokenOutDecimals)) / (sqrtPriceX96Big * sqrtPriceX96Big);
-    console.log(`PriceX96 (USDC/WSTT): ${ethers.formatUnits(priceX96, tokenOutDecimals)}`);
+    // sqrtPriceX96 is token0/token1 (WSTT < USDC, so WSTT/USDC), we want USDC/WSTT
+    const priceX96 = (sqrtPriceX96Big * sqrtPriceX96Big * BigInt(10 ** tokenOutDecimals)) / (BigInt(2) ** BigInt(192));
+    const price = priceX96 * BigInt(10 ** tokenInDecimals) / BigInt(10 ** tokenOutDecimals); // Adjust for decimals
+    console.log(`PriceX96 (WSTT/USDC): ${priceX96.toString()}`);
+    console.log(`Price (USDC/WSTT): ${ethers.formatUnits(price, tokenOutDecimals)}`);
 
     const feeMultiplier = BigInt(10000) - BigInt(fee);
     const amountInAfterFee = (amountIn * feeMultiplier) / BigInt(10000);
-    const amountOut = (amountInAfterFee * priceX96) / BigInt(10 ** tokenInDecimals);
+    const amountOut = (amountInAfterFee * price) / BigInt(10 ** tokenInDecimals);
     console.log(`Fee Multiplier: ${feeMultiplier}`);
     console.log(`Amount In After Fee: ${ethers.formatUnits(amountInAfterFee, tokenInDecimals)} ${TOKENS[tokenInAddress === TOKENS.WSTT.address ? "WSTT" : "USDC"].symbol}`);
     console.log(`Raw amountOut: ${amountOut.toString()}`);
     return amountOut;
 }
+
 
 async function approveToken(tokenContract, tokenName, amount, tokenDecimals) {
     try {
@@ -246,7 +249,7 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
     const params = {
         tokenIn: tokenInAddress,
         tokenOut: tokenOutAddress,
-        // Removed deployer to test simpler params
+        deployer: poolDeployer, // Using poolDeployer as deployer, verify if this is correct
         recipient: wallet.address,
         deadline: deadline,
         amountIn: amountIn,
