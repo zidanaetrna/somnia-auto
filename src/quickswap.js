@@ -35,7 +35,6 @@ const quickSwapAbi = [
                 "components": [
                     { "internalType": "address", "name": "tokenIn", "type": "address" },
                     { "internalType": "address", "name": "tokenOut", "type": "address" },
-                    { "internalType": "uint24", "name": "fee", "type": "uint24" }, // Added fee
                     { "internalType": "address", "name": "deployer", "type": "address" },
                     { "internalType": "address", "name": "recipient", "type": "address" },
                     { "internalType": "uint256", "name": "deadline", "type": "uint256" },
@@ -139,25 +138,14 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
 async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress, amountIn, tokenInDecimals, tokenOutDecimals) {
     const { sqrtPriceX96, fee } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
     const sqrtPriceX96Big = BigInt(sqrtPriceX96);
-    const numerator = sqrtPriceX96Big * sqrtPriceX96Big * BigInt(10 ** (tokenOutDecimals + tokenInDecimals));
-    const denominator = (BigInt(2) ** BigInt(192)) * BigInt(10 ** tokenInDecimals);
+    const priceX96 = (sqrtPriceX96Big * sqrtPriceX96Big * BigInt(10 ** tokenOutDecimals)) / (BigInt(2) ** BigInt(192));
+    console.log(`PriceX96 (WSTT/USDC): ${priceX96.toString()}`);
 
-    let price;
-    if (tokenInAddress < tokenOutAddress) {
-        if (numerator === 0n) throw new Error("Numerator is zero, cannot calculate price");
-        price = denominator / numerator; // USDC/WSTT
-        console.log(`Calculated Price (USDC/WSTT): ${ethers.formatUnits(price, tokenOutDecimals)}`);
-    } else {
-        price = numerator / denominator; // WSTT/USDC
-        console.log(`Calculated Price (WSTT/USDC): ${ethers.formatUnits(price, tokenOutDecimals)}`);
-    }
-
-    if (price === 0n) throw new Error("Calculated price is zero, cannot proceed with swap");
-
-    const feeBigInt = BigInt(fee);
-    const feeMultiplier = BigInt(10000) - feeBigInt;
-    const amountOut = (amountIn * price * feeMultiplier) / (BigInt(10000) * BigInt(10 ** tokenInDecimals));
+    const feeMultiplier = BigInt(10000) - BigInt(fee);
+    const amountInAfterFee = (amountIn * feeMultiplier) / BigInt(10000);
+    const amountOut = (amountInAfterFee * priceX96) / BigInt(10 ** tokenInDecimals);
     console.log(`Fee Multiplier: ${feeMultiplier}`);
+    console.log(`Amount In After Fee: ${ethers.formatUnits(amountInAfterFee, tokenInDecimals)} ${TOKENS[tokenInAddress === TOKENS.WSTT.address ? "WSTT" : "USDC"].symbol}`);
     console.log(`Raw amountOut: ${amountOut.toString()}`);
     return amountOut;
 }
@@ -243,7 +231,7 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
     const tokenInAddress = TOKENS[tokenInKeyForSwap].address;
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
-    const { sqrtPriceX96, fee } = await checkPoolLiquidity(factory, tokenInAddress, tokenOutAddress, tokenOut.decimals);
+    const { fee } = await checkPoolLiquidity(factory, tokenInAddress, tokenOutAddress, tokenOut.decimals);
     console.log(`Pool Fee (actual): ${fee} bps, Expected: ${FEE_TIER} bps`);
 
     const expectedOut = await getExpectedOutput(factory, tokenInAddress, tokenOutAddress, amountIn, TOKENS[tokenInKeyForSwap].decimals, tokenOut.decimals);
@@ -257,7 +245,6 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
     const params = {
         tokenIn: tokenInAddress,
         tokenOut: tokenOutAddress,
-        fee: fee, // Use actual pool fee (145 bps)
         deployer: poolDeployer,
         recipient: wallet.address,
         deadline: deadline,
