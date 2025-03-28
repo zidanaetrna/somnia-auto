@@ -138,8 +138,9 @@ async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddres
 async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress, amountIn, tokenInDecimals, tokenOutDecimals) {
     const { sqrtPriceX96, fee } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
     const sqrtPriceX96Big = BigInt(sqrtPriceX96);
-    const priceX96 = (sqrtPriceX96Big * sqrtPriceX96Big * BigInt(10 ** tokenOutDecimals)) / (BigInt(2) ** BigInt(192));
-    console.log(`PriceX96 (WSTT/USDC): ${priceX96.toString()}`);
+    // sqrtPriceX96 is price of tokenIn/tokenOut, so for WSTT -> USDC, we invert it
+    const priceX96 = (BigInt(2) ** BigInt(192) * BigInt(10 ** tokenOutDecimals)) / (sqrtPriceX96Big * sqrtPriceX96Big);
+    console.log(`PriceX96 (USDC/WSTT): ${ethers.formatUnits(priceX96, tokenOutDecimals)}`);
 
     const feeMultiplier = BigInt(10000) - BigInt(fee);
     const amountInAfterFee = (amountIn * feeMultiplier) / BigInt(10000);
@@ -245,7 +246,7 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
     const params = {
         tokenIn: tokenInAddress,
         tokenOut: tokenOutAddress,
-        deployer: poolDeployer,
+        // Removed deployer to test simpler params
         recipient: wallet.address,
         deadline: deadline,
         amountIn: amountIn,
