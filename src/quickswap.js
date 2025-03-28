@@ -35,6 +35,7 @@ const quickSwapAbi = [
                 "components": [
                     { "internalType": "address", "name": "tokenIn", "type": "address" },
                     { "internalType": "address", "name": "tokenOut", "type": "address" },
+                    { "internalType": "uint24", "name": "fee", "type": "uint24" }, // Added fee
                     { "internalType": "address", "name": "deployer", "type": "address" },
                     { "internalType": "address", "name": "recipient", "type": "address" },
                     { "internalType": "uint256", "name": "deadline", "type": "uint256" },
@@ -242,7 +243,6 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
     const tokenInAddress = TOKENS[tokenInKeyForSwap].address;
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
-    // Log pool details before swap
     const { sqrtPriceX96, fee } = await checkPoolLiquidity(factory, tokenInAddress, tokenOutAddress, tokenOut.decimals);
     console.log(`Pool Fee (actual): ${fee} bps, Expected: ${FEE_TIER} bps`);
 
@@ -257,6 +257,7 @@ async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, f
     const params = {
         tokenIn: tokenInAddress,
         tokenOut: tokenOutAddress,
+        fee: fee, // Use actual pool fee (145 bps)
         deployer: poolDeployer,
         recipient: wallet.address,
         deadline: deadline,
