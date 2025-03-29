@@ -68,7 +68,7 @@ const factoryAbi = [
 ];
 
 const poolAbi = [
-    "function globalState() external view returns (uint160 price, int24 tick, uint16 feeZto, uint16 feeOtz, uint16 timepointIndex, uint8 communityFeeToken0, uint8 communityFeeToken1, bool unlocked)",
+    "function globalState() external view returns (uint160, int24, uint16, uint16, uint16, uint8, uint8, bool)",
     "function fee() external view returns (uint24)",
     "function liquidity() external view returns (uint128)",
     "function token0() external view returns (address)",
@@ -105,14 +105,14 @@ async function getPoolPrice(poolAddress) {
     const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
     try {
         const globalState = await poolContract.globalState();
-        const sqrtPriceX96 = globalState.price; // Algebra uses 'price' instead of 'sqrtPriceX96'
+        const sqrtPriceX96 = globalState[0]; // First return value is price
         const price = (Number(sqrtPriceX96) ** 2) / (2 ** 192) * (10 ** 12); // WSTT/USDC (18 - 6 decimals)
         console.log(`Current pool price: 1 WSTT = ${price} USDC`);
         return price;
     } catch (error) {
         console.error("Failed to fetch pool price:", error.message);
-        console.log("Falling back to static minimum output");
-        return 0.14554; // From manual swap (0.014554 USDC for 0.1 WSTT)
+        console.log("Falling back to static minimum output with higher slippage");
+        return 0.14554 * 0.95; // 5% slippage from manual swap rate
     }
 }
 
@@ -141,9 +141,6 @@ async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddres
         console.log(`Pool Fee: ${fee} (basis points)`);
         console.log(`Pool Tokens: token0=${token0}, token1=${token1}`);
         console.log(`USDC Balance in Pool: ${ethers.formatUnits(usdcBalance, 6)} USDC`);
-        if (fee !== feeTier) {
-            console.log(`Warning: Pool fee (${fee}) differs from requested (${feeTier})`);
-        }
         return { poolAddress, fee, liquidity: liquidity > 0 };
     } catch (error) {
         console.error("Error verifying pool:", error.message);
@@ -206,7 +203,7 @@ async function swapTokens(tokenInKey, tokenOutKey, amountIn, factory) {
     const price = await getPoolPrice(poolAddress);
     const amountOutExpected = price * Number(amountIn);
     let amountOutMinimum = ethers.parseUnits(amountOutExpected.toFixed(6), tokenOut.decimals);
-    amountOutMinimum = amountOutMinimum * BigInt(995) / BigInt(1000); // 0.5% slippage
+    amountOutMinimum = amountOutMinimum * BigInt(950) / BigInt(1000); // 5% slippage
     console.log(`Expected output: ${amountOutExpected} ${tokenOut.symbol}, Minimum with slippage: ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
 
     const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
