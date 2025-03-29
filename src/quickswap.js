@@ -73,7 +73,9 @@ const factoryAbi = [
 const poolAbi = [
     "function globalState() external view returns (uint160 price, int24 tick, uint16 feeZto, uint16 feeOtz, uint16 timepointIndex, uint8 communityFee)",
     "function fee() external view returns (uint24)",
-    "function liquidity() external view returns (uint128)"
+    "function liquidity() external view returns (uint128)",
+    "function token0() external view returns (address)",
+    "function token1() external view returns (address)"
 ];
 
 const quickSwapContract = new ethers.Contract(QUICKSWAP_ADDRESS, quickSwapAbi, wallet);
@@ -114,7 +116,12 @@ async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddres
         }
         const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
         const liquidity = await poolContract.liquidity();
+        const token0 = await poolContract.token0();
+        const token1 = await poolContract.token1();
+        const usdcBalance = await tokenContracts["USDC"].balanceOf(poolAddress);
         console.log(`Pool Liquidity: ${ethers.formatEther(liquidity)}`);
+        console.log(`Pool Tokens: token0=${token0}, token1=${token1}`);
+        console.log(`USDC Balance in Pool: ${ethers.formatUnits(usdcBalance, 6)} USDC`);
         return liquidity > 0 ? poolAddress : null;
     } catch (error) {
         console.error("Error checking liquidity pool:", error.message);
@@ -184,6 +191,22 @@ async function swapTokens(tokenInKey, tokenOutKey, amountIn, poolDeployer, facto
     const wNativeToken = await quickSwapContract.WNativeToken();
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
+    const poolAddress = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress);
+    if (!poolAddress) {
+        throw new Error(`No viable liquidity pool for ${tokenIn.symbol} > ${tokenOut.symbol}`);
+    }
+
+    // Use the exact minimum received from the QuickSwap website for STT > USDC
+    let amountOutMinimum;
+    if (tokenInKey === "STT" && tokenOutKey === "USDC" && amountIn === "0.1") {
+        amountOutMinimum = ethers.parseUnits("0.014482", tokenOut.decimals); // From website
+        console.log(`Using website minimum received: ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
+    } else {
+        // Fallback to 0 for other swaps (can be improved later)
+        amountOutMinimum = 0;
+        console.log("No specific minimum set, using 0 (no slippage protection)");
+    }
+
     const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
     const params = {
         tokenIn: tokenInAddress,
@@ -192,11 +215,28 @@ async function swapTokens(tokenInKey, tokenOutKey, amountIn, poolDeployer, facto
         recipient: wallet.address,
         deadline: deadline,
         amountIn: amount,
-        amountOutMinimum: 0, // Simplified, adjust if slippage protection needed
+        amountOutMinimum: amountOutMinimum,
         limitSqrtPrice: 0
     };
 
+    console.log("Swap Parameters:", JSON.stringify(params, (key, value) => typeof value === 'bigint' ? value.toString() : value));
+
     const overrides = { gasLimit: 1000000 };
+
+    // Simulate the transaction
+    console.log("Simulating transaction...");
+    const tx = await quickSwapContract.exactInputSingle.populateTransaction(params, overrides);
+    try {
+        await provider.call(tx);
+        console.log("Simulation successful");
+    } catch (simError) {
+        console.error("Simulation failed:", simError.message);
+        if (simError.data) {
+            console.error("Simulation revert data:", simError.data);
+        }
+        throw simError;
+    }
+
     const swapTx = await quickSwapContract.exactInputSingle(params, overrides);
     const receipt = await swapTx.wait();
     console.log(`Swapped ${tokenIn.symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
