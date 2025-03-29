@@ -1,8 +1,6 @@
 require('dotenv').config();
 const readline = require('readline');
 const ethers = require('ethers');
-const { performSwap } = require('./swap');
-const { startBot } = require('./auto');
 const { performQuickSwap } = require('./quickswap');
 
 const PROJECT_NAME = process.env.PROJECT_NAME || "Somnia";
@@ -54,69 +52,18 @@ async function getUserInput() {
                 process.exit(1);
             }
 
-            if (choice === 1) {
-                // Automatic swap only
-                rl.question("Enter the amount of tokens to swap (e.g., 0.1): ", (amount) => {
-                    rl.question("Enter the number of times to swap (e.g., 2): ", (count) => {
-                        const amountToSwap = parseFloat(amount);
-                        const swapCount = parseInt(count);
-                        if (isNaN(amountToSwap) || amountToSwap <= 0) {
-                            console.error("Invalid amount to swap. Must be a positive number.");
-                            process.exit(1);
-                        }
-                        if (isNaN(swapCount) || swapCount <= 0) {
-                            console.error("Invalid number of swaps. Must be a positive integer.");
-                            process.exit(1);
-                        }
-                        resolve({ choice, amountToSwap, swapCount });
-                    });
-                });
-            } else if (choice === 2) {
-                // Automatic send only
-                rl.question("Enter the number of wallets to generate (e.g., 2): ", (num) => {
-                    const numWallets = parseInt(num);
-                    if (isNaN(numWallets) || numWallets <= 0) {
-                        console.error("Invalid number of wallets. Must be a positive integer.");
-                        process.exit(1);
-                    }
-                    resolve({ choice, numWallets });
-                });
-            } else if (choice === 3) {
-                // Both: Perform swaps first, then start automatic transactions
-                rl.question("Enter the number of wallets to generate (e.g., 2): ", (num) => {
-                    const numWallets = parseInt(num);
-                    if (isNaN(numWallets) || numWallets <= 0) {
-                        console.error("Invalid number of wallets. Must be a positive integer.");
-                        process.exit(1);
-                    }
-                    rl.question("Enter the amount of tokens to swap (e.g., 0.1): ", (amount) => {
-                        rl.question("Enter the number of times to swap (e.g., 2): ", (count) => {
-                            const amountToSwap = parseFloat(amount);
-                            const swapCount = parseInt(count);
-                            if (isNaN(amountToSwap) || amountToSwap <= 0) {
-                                console.error("Invalid amount to swap. Must be a positive number.");
-                                process.exit(1);
-                            }
-                            if (isNaN(swapCount) || swapCount <= 0) {
-                                console.error("Invalid number of swaps. Must be a positive integer.");
-                                process.exit(1);
-                            }
-                            resolve({ choice, numWallets, amountToSwap, swapCount });
-                        });
-                    });
-                });
-            } else if (choice === 4) {
-                // Swap via QuickSwap
+            if (choice === 4) {
                 console.log("\nAvailable tokens: STT, WSTT, USDC, WETH");
+                console.log("Supported swaps: STT > [USDC, WETH, WSTT], WSTT > [USDC, WETH, STT], USDC > [STT, WSTT, WETH], WETH > [STT, USDC, WSTT]");
                 rl.question("Enter the token to swap from (e.g., STT): ", (tokenIn) => {
                     const tokenInKey = tokenIn.toUpperCase();
-                    if (!["STT", "WSTT", "USDC", "WETH"].includes(tokenInKey)) {
+                    if (!TOKENS[tokenInKey]) {
                         console.error("Invalid token. Must be one of: STT, WSTT, USDC, WETH");
                         process.exit(1);
                     }
-                    rl.question("Enter the token to swap to (e.g., WSTT): ", (tokenOut) => {
+                    rl.question("Enter the token to swap to (e.g., USDC): ", (tokenOut) => {
                         const tokenOutKey = tokenOut.toUpperCase();
-                        if (!["STT", "WSTT", "USDC", "WETH"].includes(tokenOutKey)) {
+                        if (!TOKENS[tokenOutKey]) {
                             console.error("Invalid token. Must be one of: STT, WSTT, USDC, WETH");
                             process.exit(1);
                         }
@@ -127,13 +74,23 @@ async function getUserInput() {
                         rl.question("Enter the amount of tokens to swap (e.g., 0.1): ", (amount) => {
                             const amountToSwap = parseFloat(amount);
                             if (isNaN(amountToSwap) || amountToSwap <= 0) {
-                                console.error("Invalid amount to swap. Must be a positive number.");
+                                console.error("Invalid amount. Must be a positive number.");
                                 process.exit(1);
                             }
-                            resolve({ choice, tokenInKey, tokenOutKey, amountToSwap });
+                            rl.question("How many times do you want to swap? (e.g., 2, or 'n' for once): ", (count) => {
+                                const swapCount = count.toLowerCase() === 'n' || count.toLowerCase() === 'no' ? 1 : parseInt(count);
+                                if (isNaN(swapCount) || swapCount < 1) {
+                                    console.error("Invalid swap count. Must be a positive integer or 'n'.");
+                                    process.exit(1);
+                                }
+                                resolve({ choice, tokenInKey, tokenOutKey, amountToSwap, swapCount });
+                            });
                         });
                     });
                 });
+            } else {
+                console.error("Only option 4 is currently implemented.");
+                process.exit(1);
             }
         });
     });
@@ -141,28 +98,24 @@ async function getUserInput() {
 
 (async () => {
     displayInterface();
-    const { choice, numWallets, amountToSwap, swapCount, tokenInKey, tokenOutKey } = await getUserInput();
+    const { choice, tokenInKey, tokenOutKey, amountToSwap, swapCount } = await getUserInput();
 
-    if (choice === 1) {
-        // Automatic swap only
-        await performSwap(amountToSwap, swapCount);
-        rl.close();
-    } else if (choice === 2) {
-        // Automatic send only
-        console.log("Starting automatic send...");
-        await startBot(numWallets, false);
-    } else if (choice === 3) {
-        // Both: Perform swaps first, then start automatic transactions
-        await performSwap(amountToSwap, swapCount);
-        console.log("\nStarting automatic send...");
-        await startBot(numWallets, true); // Include token transfers
-    } else if (choice === 4) {
-        // Swap via QuickSwap
-        console.log(`\nPerforming QuickSwap: ${tokenInKey} to ${tokenOutKey}`);
-        const tokenIn = TOKENS[tokenInKey].address; // Get address from TOKENS
-        const tokenOut = TOKENS[tokenOutKey].address; // Get address from TOKENS
-        const amountIn = ethers.parseUnits(amountToSwap.toString(), TOKENS[tokenInKey].decimals); // Convert to BigInt with decimals
-        await performQuickSwap(wallet, tokenIn, tokenOut, amountIn, provider);
-        rl.close();
+    if (choice === 4) {
+        console.log(`\nPerforming QuickSwap: ${tokenInKey} to ${tokenOutKey} (${swapCount} time${swapCount > 1 ? 's' : ''})`);
+        const amountIn = ethers.parseUnits(amountToSwap.toString(), TOKENS[tokenInKey].decimals);
+
+        for (let i = 0; i < swapCount; i++) {
+            console.log(`\nSwap ${i + 1}/${swapCount}:`);
+            if (i % 2 === 0) {
+                // Forward swap (e.g., STT > USDC)
+                await performQuickSwap(wallet, tokenInKey, tokenOutKey, amountIn, provider);
+            } else {
+                // Reverse swap (e.g., USDC > STT)
+                const reverseAmountIn = ethers.parseUnits(amountToSwap.toString(), TOKENS[tokenOutKey].decimals); // Approximate reverse amount
+                await performQuickSwap(wallet, tokenOutKey, tokenInKey, reverseAmountIn, provider);
+            }
+        }
     }
+
+    rl.close();
 })();
