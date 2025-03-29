@@ -76,21 +76,6 @@ const poolAbi = [
     "function liquidity() external view returns (uint128)"
 ];
 
-const PoolAddressABI = [
-    {
-        "inputs": [
-            { "internalType": "address", "name": "deployer", "type": "address" },
-            { "internalType": "address", "name": "tokenA", "type": "address" },
-            { "internalType": "address", "name": "tokenB", "type": "address" }
-        ],
-        "name": "computeAddress",
-        "outputs": [{ "internalType": "address", "name": "", "type": "address" }],
-        "stateMutability": "pure",
-        "type": "function"
-    }
-];
-
-
 const quickSwapContract = new ethers.Contract(QUICKSWAP_ADDRESS, quickSwapAbi, wallet);
 
 const tokenContracts = {};
@@ -124,50 +109,18 @@ async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddres
         const factoryContract = new ethers.Contract(factoryAddress, factoryAbi, provider);
         const poolAddress = await factoryContract.poolByPair(tokenInAddress, tokenOutAddress);
         console.log(`Liquidity Pool for ${tokenInAddress} - ${tokenOutAddress}: ${poolAddress}`);
-        return poolAddress !== ethers.ZeroAddress ? poolAddress : null;
+        if (poolAddress === ethers.ZeroAddress) {
+            return null;
+        }
+        const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
+        const liquidity = await poolContract.liquidity();
+        console.log(`Pool Liquidity: ${ethers.formatEther(liquidity)}`);
+        return liquidity > 0 ? poolAddress : null;
     } catch (error) {
         console.error("Error checking liquidity pool:", error.message);
         return null;
     }
 }
-
-async function checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals) {
-    const poolAddress = await checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddress);
-    if (!poolAddress) throw new Error("No pool found");
-    const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
-    const globalState = await poolContract.globalState();
-    const fee = await poolContract.fee();
-    const liquidity = await poolContract.liquidity();
-    const sqrtPriceX96 = globalState[0];
-    console.log(`Pool sqrtPriceX96: ${sqrtPriceX96.toString()}`);
-    console.log(`Pool Fee Tier: ${fee} (bps)`);
-    console.log(`Pool Liquidity: ${liquidity.toString()}`);
-    const usdcBalance = await tokenContracts["USDC"].balanceOf(poolAddress);
-    console.log(`USDC Balance in Pool: ${ethers.formatUnits(usdcBalance, 6)} USDC`);
-    if (sqrtPriceX96 === 0n) {
-        throw new Error("Pool has no liquidity (sqrtPriceX96 = 0)");
-    }
-    return { poolAddress, sqrtPriceX96, fee };
-}
-
-async function getExpectedOutput(factoryAddress, tokenInAddress, tokenOutAddress, amountIn, tokenInDecimals, tokenOutDecimals) {
-    const { sqrtPriceX96, fee } = await checkPoolLiquidity(factoryAddress, tokenInAddress, tokenOutAddress, tokenOutDecimals);
-    const sqrtPriceX96Big = BigInt(sqrtPriceX96);
-    // sqrtPriceX96 is token0/token1 (WSTT < USDC, so WSTT/USDC), we want USDC/WSTT
-    const priceX96 = (sqrtPriceX96Big * sqrtPriceX96Big) / (BigInt(2) ** BigInt(192));
-    const price = (priceX96 * BigInt(10 ** tokenOutDecimals)) / BigInt(10 ** tokenInDecimals); // USDC per WSTT
-    console.log(`PriceX96 (WSTT/USDC): ${priceX96.toString()}`);
-    console.log(`Price (USDC/WSTT): ${ethers.formatUnits(price, tokenOutDecimals)}`);
-
-    const feeMultiplier = BigInt(10000) - BigInt(fee);
-    const amountInAfterFee = (amountIn * feeMultiplier) / BigInt(10000);
-    const amountOut = (amountInAfterFee * price) / BigInt(10 ** tokenInDecimals);
-    console.log(`Fee Multiplier: ${feeMultiplier}`);
-    console.log(`Amount In After Fee: ${ethers.formatUnits(amountInAfterFee, tokenInDecimals)} ${TOKENS[tokenInAddress === TOKENS.WSTT.address ? "WSTT" : "USDC"].symbol}`);
-    console.log(`Raw amountOut: ${amountOut.toString()}`);
-    return amountOut;
-}
-
 
 async function approveToken(tokenContract, tokenName, amount, tokenDecimals) {
     try {
@@ -202,181 +155,82 @@ async function unwrapWSTT(amount) {
     console.log(`Unwrapped WSTT to STT: ${withdrawTx.hash}`);
 }
 
-async function swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, factory) {
+async function swapTokens(tokenInKey, tokenOutKey, amountIn, poolDeployer, factory) {
     const tokenIn = TOKENS[tokenInKey];
     const tokenOut = TOKENS[tokenOutKey];
-    const amountIn = ethers.parseUnits(amountToSwap.toString(), tokenIn.decimals);
+    const amount = ethers.parseUnits(amountIn.toString(), tokenIn.decimals);
 
     let tokenInAddress = tokenIn.address;
     let balance;
 
-    if (tokenInKey === "WSTT") {
-        balance = await tokenContracts["WSTT"].balanceOf(wallet.address);
-        console.log(`WSTT Balance: ${ethers.formatUnits(balance, 18)}`);
-        console.log(`Required WSTT: ${ethers.formatUnits(amountIn, 18)}`);
-        if (balance < amountIn) {
-            console.log(`Insufficient WSTT balance: ${ethers.formatUnits(balance, 18)}, required: ${ethers.formatUnits(amountIn, 18)}`);
-            const sttBalance = await provider.getBalance(wallet.address);
-            console.log(`STT Balance: ${ethers.formatEther(sttBalance)}`);
-            if (sttBalance < amountIn) {
-                throw new Error(`Insufficient STT balance to wrap: ${ethers.formatEther(sttBalance)}, required: ${ethers.formatEther(amountIn)}`);
-            }
-            console.log(`Wrapping ${ethers.formatEther(amountIn)} STT to WSTT...`);
-            await wrapSTT(amountIn);
-            balance = await tokenContracts["WSTT"].balanceOf(wallet.address);
-            console.log(`New WSTT Balance after wrapping: ${ethers.formatUnits(balance, 18)}`);
-        }
-    } else if (tokenIn.isNative) {
+    if (tokenIn.isNative) {
         balance = await provider.getBalance(wallet.address);
         console.log(`STT Balance: ${ethers.formatEther(balance)}`);
-        if (balance < amountIn) {
-            throw new Error(`Insufficient STT balance: ${ethers.formatEther(balance)}, required: ${ethers.formatEther(amountIn)}`);
+        if (balance < amount) {
+            throw new Error(`Insufficient STT balance: ${ethers.formatEther(balance)}, required: ${ethers.formatEther(amount)}`);
         }
-        console.log(`Wrapping ${ethers.formatEther(amountIn)} STT to WSTT...`);
-        await wrapSTT(amountIn);
+        await wrapSTT(amount);
         tokenInAddress = TOKENS["WSTT"].address;
-        balance = await tokenContracts["WSTT"].balanceOf(wallet.address);
-        console.log(`New WSTT Balance after wrapping: ${ethers.formatUnits(balance, 18)}`);
     } else {
         balance = await tokenContracts[tokenInKey].balanceOf(wallet.address);
         console.log(`${tokenIn.symbol} Balance: ${ethers.formatUnits(balance, tokenIn.decimals)}`);
-        if (balance < amountIn) {
-            throw new Error(`Insufficient ${tokenIn.symbol} balance: ${ethers.formatUnits(balance, tokenIn.decimals)}, required: ${ethers.formatUnits(amountIn, tokenIn.decimals)}`);
+        if (balance < amount) {
+            throw new Error(`Insufficient ${tokenIn.symbol} balance: ${ethers.formatUnits(balance, tokenIn.decimals)}`);
         }
     }
 
-    console.log(`Swapping ${ethers.formatUnits(amountIn, tokenIn.decimals)} ${tokenIn.symbol} to ${tokenOut.symbol}...`);
+    await approveToken(tokenContracts[tokenIn.isNative ? "WSTT" : tokenInKey], tokenIn.isNative ? "WSTT" : tokenIn.symbol, amount, tokenIn.decimals);
 
-    await approveToken(tokenContracts[tokenInKey], tokenIn.symbol, amountIn, tokenIn.decimals);
-
-    const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
     const wNativeToken = await quickSwapContract.WNativeToken();
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
-    const { fee } = await checkPoolLiquidity(factory, tokenInAddress, tokenOutAddress, tokenOut.decimals);
-    console.log(`Pool Fee (actual): ${fee} bps, Expected: ${FEE_TIER} bps`);
-
-    const expectedOut = await getExpectedOutput(factory, tokenInAddress, tokenOutAddress, amountIn, tokenIn.decimals, tokenOut.decimals);
-    const manualAmountOutMinimum = ethers.parseUnits("0.014544", tokenOut.decimals);
-    const amountOutMinimum = manualAmountOutMinimum;
-    console.log(`Expected Output (calculated): ${ethers.formatUnits(expectedOut, tokenOut.decimals)} ${tokenOut.symbol}`);
-    console.log(`Manual Expected Output: 0.014617 ${tokenOut.symbol}`);
-    console.log(`amountOutMinimum (manual, 0.5% slippage): ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
-
+    const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
     const params = {
         tokenIn: tokenInAddress,
         tokenOut: tokenOutAddress,
         deployer: poolDeployer,
         recipient: wallet.address,
         deadline: deadline,
-        amountIn: amountIn,
-        amountOutMinimum: amountOutMinimum,
+        amountIn: amount,
+        amountOutMinimum: 0, // Simplified, adjust if slippage protection needed
         limitSqrtPrice: 0
     };
 
-    console.log("Swap Parameters:", JSON.stringify(params, (key, value) => typeof value === 'bigint' ? value.toString() : value));
-
-    // Compute and log the expected pool address
-    const poolAddressContract = new ethers.Contract("0xE94de02e52Eaf9F0f6Bf7f16E4927FcBc2c09bC7", PoolAddressABI, provider); // Use router address or PoolAddress lib if separate
-    const computedPoolAddress = await poolAddressContract.computeAddress(
-        poolDeployer,
-        tokenInAddress < tokenOutAddress ? tokenInAddress : tokenOutAddress,
-        tokenInAddress < tokenOutAddress ? tokenOutAddress : tokenInAddress
-    );
-    console.log(`Computed Pool Address: ${computedPoolAddress}`);
-    console.log(`Actual Pool Address: 0xdc62e0a2Be944672E48aE4860e6Dfc727362B8E0`);
-
     const overrides = { gasLimit: 1000000 };
+    const swapTx = await quickSwapContract.exactInputSingle(params, overrides);
+    const receipt = await swapTx.wait();
+    console.log(`Swapped ${tokenIn.symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
 
-    try {
-        // Simulate the transaction
-        const tx = await quickSwapContract.exactInputSingle.populateTransaction(params, overrides);
-        console.log("Simulating transaction...");
-        try {
-            await provider.call(tx);
-            console.log("Simulation successful");
-        } catch (simError) {
-            console.error("Simulation failed:", simError.message);
-            if (simError.data) {
-                console.error("Simulation revert data:", simError.data);
-            }
+    if (tokenOut.isNative) {
+        const wsttBalance = await tokenContracts["WSTT"].balanceOf(wallet.address);
+        if (wsttBalance > 0) {
+            await unwrapWSTT(wsttBalance);
         }
-
-        const swapTx = await quickSwapContract.exactInputSingle(params, overrides);
-        console.log("Raw TX:", JSON.stringify(swapTx, (key, value) => typeof value === 'bigint' ? value.toString() : value));
-        const swapReceipt = await swapTx.wait();
-        console.log(`Swapped ${tokenIn.symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
-
-        if (tokenOut.isNative) {
-            const wsttBalance = await tokenContracts["WSTT"].balanceOf(wallet.address);
-            if (wsttBalance > 0) {
-                await unwrapWSTT(wsttBalance);
-            }
-        }
-    } catch (error) {
-        if (error.code === 'CALL_EXCEPTION') {
-            console.error("Revert Reason:", error.reason || "Unknown revert reason");
-            if (error.data && error.data !== "0x") {
-                try {
-                    const decodedError = ethers.AbiCoder.defaultAbiCoder().decode(["string"], `0x${error.data.slice(10)}`);
-                    console.error("Decoded Revert Reason:", decodedError[0]);
-                } catch (decodeError) {
-                    console.error("Failed to decode revert reason:", decodeError.message);
-                    console.error("Raw Revert Data:", error.data);
-                }
-            } else {
-                console.error("No revert data available");
-            }
-            console.error("Transaction:", JSON.stringify(error.transaction, (key, value) => typeof value === 'bigint' ? value.toString() : value));
-            console.error("Receipt:", JSON.stringify(error.receipt, (key, value) => typeof value === 'bigint' ? value.toString() : value));
-        }
-        throw error;
     }
 }
 
-async function performQuickSwap(wallet, tokenIn, tokenOut, amountIn, provider) {
+async function performQuickSwap(wallet, tokenInKey, tokenOutKey, amountIn, provider) {
     try {
-        if (!wallet || !tokenIn || !tokenOut || amountIn === undefined || !provider) {
-            throw new Error(`Missing required parameters: ${
-                [!wallet && 'wallet', !tokenIn && 'tokenIn', !tokenOut && 'tokenOut', amountIn === undefined && 'amountIn', !provider && 'provider'].filter(Boolean).join(', ')
-            }`);
+        if (!wallet || !tokenInKey || !tokenOutKey || amountIn === undefined || !provider) {
+            throw new Error(`Missing required parameters`);
         }
 
-        console.log("\n=== Starting QuickSwap ===");
+        console.log(`\n=== Starting QuickSwap: ${tokenInKey} to ${tokenOutKey} ===`);
         console.log("Wallet Address:", wallet.address);
-
-        const wNativeTokenAddress = await quickSwapContract.WNativeToken();
-        console.log("WNativeToken Address:", wNativeTokenAddress);
-
-        const tokenInKey = Object.keys(TOKENS).find(key => 
-            (TOKENS[key].address && TOKENS[key].address.toLowerCase() === tokenIn.toLowerCase()) ||
-            (TOKENS[key].isNative && tokenIn.toLowerCase() === wNativeTokenAddress.toLowerCase())
-        );
-        
-        const tokenOutKey = Object.keys(TOKENS).find(key => 
-            (TOKENS[key].address && TOKENS[key].address.toLowerCase() === tokenOut.toLowerCase()) ||
-            (TOKENS[key].isNative && tokenOut.toLowerCase() === wNativeTokenAddress.toLowerCase())
-        );
-
-        if (!tokenInKey || !tokenOutKey) {
-            throw new Error(`Token not found in configuration. Input Tokens: ${tokenIn}, ${tokenOut}, Available Tokens: ${Object.keys(TOKENS).join(', ')}`);
-        }
 
         const tokenInInfo = TOKENS[tokenInKey];
         const tokenOutInfo = TOKENS[tokenOutKey];
+        const wNativeTokenAddress = await quickSwapContract.WNativeToken();
 
-        console.log(`\nSwap Details:
-            From: ${tokenInInfo.symbol} (${tokenIn})
-            To: ${tokenOutInfo.symbol} (${tokenOut})
+        console.log(`Swap Details:
+            From: ${tokenInInfo.symbol} (${tokenInInfo.isNative ? 'Native' : tokenInInfo.address})
+            To: ${tokenOutInfo.symbol} (${tokenOutInfo.isNative ? 'Native' : tokenOutInfo.address})
             Amount: ${ethers.formatUnits(amountIn, tokenInInfo.decimals)} ${tokenInInfo.symbol}`);
 
         const sttBalance = await provider.getBalance(wallet.address);
-        console.log(`\nBalances:
-            STT: ${ethers.formatEther(sttBalance)} (gas token)
-            Minimum Required: ${MIN_GAS_BALANCE}`);
-
+        console.log(`STT Balance (for gas): ${ethers.formatEther(sttBalance)}`);
         if (sttBalance < ethers.parseUnits(MIN_GAS_BALANCE, 18)) {
-            throw new Error(`Insufficient STT for gas. Have: ${ethers.formatEther(sttBalance)}, Need: ${MIN_GAS_BALANCE}`);
+            throw new Error(`Insufficient STT for gas: ${ethers.formatEther(sttBalance)}`);
         }
 
         const { poolDeployer, factory } = await logContractDetails();
@@ -384,17 +238,16 @@ async function performQuickSwap(wallet, tokenIn, tokenOut, amountIn, provider) {
         const tokenInAddress = tokenInInfo.isNative ? wNativeTokenAddress : tokenInInfo.address;
         const tokenOutAddress = tokenOutInfo.isNative ? wNativeTokenAddress : tokenOutInfo.address;
 
+        console.log(`\nChecking liquidity for ${tokenInKey} > ${tokenOutKey}...`);
         const poolAddress = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress);
         if (!poolAddress) {
-            throw new Error(`No liquidity pool for ${tokenInInfo.symbol}/${tokenOutInfo.symbol} pair`);
+            throw new Error(`No viable liquidity pool for ${tokenInKey} > ${tokenOutKey}`);
         }
+        console.log(`Liquidity pool found: ${poolAddress}`);
 
-        const amountToSwap = ethers.formatUnits(amountIn, tokenInInfo.decimals);
+        await swapTokens(tokenInKey, tokenOutKey, ethers.formatUnits(amountIn, tokenInInfo.decimals), poolDeployer, factory);
 
-        console.log("\nExecuting swap...");
-        await swapTokens(tokenInKey, tokenOutKey, amountToSwap, poolDeployer, factory);
-
-        console.log("\n=== Swap Completed Successfully ===");
+        console.log(`\n=== Swap Completed: ${tokenInKey} to ${tokenOutKey} ===`);
         console.log("Final Balances:");
         for (const tokenKey in TOKENS) {
             const token = TOKENS[tokenKey];
@@ -407,8 +260,8 @@ async function performQuickSwap(wallet, tokenIn, tokenOut, amountIn, provider) {
             }
         }
     } catch (error) {
-        console.error("\n=== Critical Error in performQuickSwap ===");
-        console.error(error);
+        console.error(`\n=== Error in QuickSwap: ${tokenInKey} to ${tokenOutKey} ===`);
+        console.error(error.message);
         throw error;
     }
 }
