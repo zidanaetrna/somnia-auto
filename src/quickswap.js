@@ -104,20 +104,26 @@ async function getPoolPrice(poolAddress) {
     const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
     const slot0 = await poolContract.slot0();
     const sqrtPriceX96 = slot0.sqrtPriceX96;
-    // Convert sqrtPriceX96 to price (WSTT/USDC)
-    const price = (Number(sqrtPriceX96) ** 2) / (2 ** 192) * (10 ** 12); // Adjust for decimals (18 - 6)
+    const price = (Number(sqrtPriceX96) ** 2) / (2 ** 192) * (10 ** 12); // WSTT/USDC (18 - 6 decimals)
     console.log(`Current pool price: 1 WSTT = ${price} USDC`);
     return price;
 }
 
-async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddress, feeTier = 3000) {
+async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddress, feeTier = 111) {
     try {
         const factoryContract = new ethers.Contract(factoryAddress, factoryAbi, provider);
         const poolAddress = await factoryContract.getPool(tokenInAddress, tokenOutAddress, feeTier);
         console.log(`Liquidity Pool for ${tokenInAddress} - ${tokenOutAddress} (Fee ${feeTier}): ${poolAddress}`);
         if (poolAddress === ethers.ZeroAddress) {
-            console.log(`No pool found for fee tier ${feeTier}.`);
-            return null;
+            console.log(`No pool found for fee tier ${feeTier}. Falling back to known pool address.`);
+            const knownPoolAddress = "0xdc62e0a2Be944672E48aE4860e6Dfc727362B8E0"; // From manual swap
+            const poolContract = new ethers.Contract(knownPoolAddress, poolAbi, provider);
+            const fee = await poolContract.fee();
+            console.log(`Using known pool ${knownPoolAddress} with fee ${fee}`);
+            if (fee !== feeTier) {
+                console.log(`Warning: Known pool fee (${fee}) differs from requested (${feeTier})`);
+            }
+            return { poolAddress: knownPoolAddress, fee, liquidity: true };
         }
         const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
         const liquidity = await poolContract.liquidity();
@@ -153,14 +159,6 @@ async function approveToken(tokenContract, tokenName, amount, tokenDecimals) {
     }
 }
 
-async function wrapSTT(amount) {
-    const wsttContract = tokenContracts["WSTT"];
-    console.log(`Wrapping ${ethers.formatEther(amount)} STT to WSTT...`);
-    const depositTx = await wsttContract.deposit({ value: amount, gasLimit: 100000 });
-    await depositTx.wait();
-    console.log(`Wrapped STT to WSTT: ${depositTx.hash}`);
-}
-
 async function swapTokens(tokenInKey, tokenOutKey, amountIn, factory) {
     const tokenIn = TOKENS[tokenInKey];
     const tokenOut = TOKENS[tokenOutKey];
@@ -190,18 +188,16 @@ async function swapTokens(tokenInKey, tokenOutKey, amountIn, factory) {
     const wNativeToken = await quickSwapContract.WNativeToken();
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
-    const poolInfo = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress, 3000);
+    const poolInfo = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress, 111);
     if (!poolInfo || !poolInfo.liquidity) {
-        throw new Error(`No viable liquidity pool for ${tokenIn.symbol} > ${tokenOut.symbol} with fee tier 3000`);
+        throw new Error(`No viable liquidity pool for ${tokenIn.symbol} > ${tokenOut.symbol} with fee tier 111`);
     }
     const { poolAddress } = poolInfo;
 
-    // Get current price from pool
     const price = await getPoolPrice(poolAddress);
     const amountOutExpected = price * Number(amountIn);
     let amountOutMinimum = ethers.parseUnits(amountOutExpected.toFixed(6), tokenOut.decimals);
-    // Apply 0.5% slippage tolerance
-    amountOutMinimum = amountOutMinimum * BigInt(995) / BigInt(1000);
+    amountOutMinimum = amountOutMinimum * BigInt(995) / BigInt(1000); // 0.5% slippage
     console.log(`Expected output: ${amountOutExpected} ${tokenOut.symbol}, Minimum with slippage: ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
 
     const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
@@ -264,7 +260,7 @@ async function performQuickSwap(wallet, tokenInKey, tokenOutKey, amountIn, provi
         const tokenOutAddress = tokenOutInfo.isNative ? wNativeTokenAddress : tokenOutInfo.address;
 
         console.log(`\nChecking liquidity for ${tokenInKey} > ${tokenOutKey}...`);
-        const poolInfo = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress, 3000);
+        const poolInfo = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress, 111);
         if (!poolInfo) {
             throw new Error(`No viable liquidity pool for ${tokenInKey} > ${tokenOutKey}`);
         }
@@ -289,6 +285,14 @@ async function performQuickSwap(wallet, tokenInKey, tokenOutKey, amountIn, provi
         console.error(error.message);
         throw error;
     }
+}
+
+async function wrapSTT(amount) {
+    const wsttContract = tokenContracts["WSTT"];
+    console.log(`Wrapping ${ethers.formatEther(amount)} STT to WSTT...`);
+    const depositTx = await wsttContract.deposit({ value: amount, gasLimit: 100000 });
+    await depositTx.wait();
+    console.log(`Wrapped STT to WSTT: ${depositTx.hash}`);
 }
 
 module.exports = { performQuickSwap };
