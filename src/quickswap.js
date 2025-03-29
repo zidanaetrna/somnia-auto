@@ -5,6 +5,7 @@ const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
 const wallet = new ethers.Wallet(process.env.MAIN_PRIVATE_KEY, provider);
 
 const QUICKSWAP_ADDRESS = "0xE94de02e52Eaf9F0f6Bf7f16E4927FcBc2c09bC7";
+const FACTORY_ADDRESS = "0x0BFaCE9a5c9F884a4f09fadB83b69e81EA41424B";
 const MIN_GAS_BALANCE = process.env.MIN_GAS_BALANCE || "0.01";
 
 const TOKENS = {
@@ -13,10 +14,6 @@ const TOKENS = {
     USDC: { address: "0xE9CC37904875B459Fa5D0FE37680d36F1ED55e38", symbol: "USDC", decimals: 6, isNative: false },
     WETH: { address: "0xd2480162Aa7F02Ead7BF4C127465446150D58452", symbol: "WETH", decimals: 18, isNative: false }
 };
-
-if (!QUICKSWAP_ADDRESS) {
-    throw new Error("Missing required environment variable: QUICKSWAP_ADDRESS");
-}
 
 const erc20Abi = [
     "function approve(address spender, uint256 amount) external returns (bool)",
@@ -52,7 +49,6 @@ const quickSwapAbi = [
         "type": "function"
     },
     { "inputs": [], "name": "WNativeToken", "outputs": [{ "internalType": "address", "name": "", "type": "address" }], "stateMutability": "view", "type": "function" },
-    { "inputs": [], "name": "poolDeployer", "outputs": [{ "internalType": "address", "name": "", "type": "address" }], "stateMutability": "view", "type": "function" },
     { "inputs": [], "name": "factory", "outputs": [{ "internalType": "address", "name": "", "type": "address" }], "stateMutability": "view", "type": "function" }
 ];
 
@@ -60,9 +56,10 @@ const factoryAbi = [
     {
         "inputs": [
             { "internalType": "address", "name": "tokenA", "type": "address" },
-            { "internalType": "address", "name": "tokenB", "type": "address" }
+            { "internalType": "address", "name": "tokenB", "type": "address" },
+            { "internalType": "uint24", "name": "fee", "type": "uint24" }
         ],
-        "name": "poolByPair",
+        "name": "getPool",
         "outputs": [{ "internalType": "address", "name": "pool", "type": "address" }],
         "stateMutability": "view",
         "type": "function"
@@ -70,7 +67,7 @@ const factoryAbi = [
 ];
 
 const poolAbi = [
-    "function globalState() external view returns (uint160 price, int24 tick, uint16 feeZto, uint16 feeOtz, uint16 timepointIndex, uint8 communityFee)",
+    "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
     "function fee() external view returns (uint24)",
     "function liquidity() external view returns (uint128)",
     "function token0() external view returns (address)",
@@ -94,23 +91,32 @@ async function logContractDetails() {
         if (wNativeToken.toLowerCase() !== TOKENS.WSTT.address.toLowerCase()) {
             throw new Error(`WNativeToken (${wNativeToken}) does not match expected WSTT address (${TOKENS.WSTT.address})`);
         }
-        const poolDeployer = await quickSwapContract.poolDeployer();
-        console.log(`Pool Deployer Address (for reference): ${poolDeployer}`);
         const factory = await quickSwapContract.factory();
         console.log(`Factory Address: ${factory}`);
-        return { poolDeployer, factory };
+        return { factory };
     } catch (error) {
         console.error("Error fetching contract details:", error.message);
         throw error;
     }
 }
 
-async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddress) {
+async function getPoolPrice(poolAddress) {
+    const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
+    const slot0 = await poolContract.slot0();
+    const sqrtPriceX96 = slot0.sqrtPriceX96;
+    // Convert sqrtPriceX96 to price (WSTT/USDC)
+    const price = (Number(sqrtPriceX96) ** 2) / (2 ** 192) * (10 ** 12); // Adjust for decimals (18 - 6)
+    console.log(`Current pool price: 1 WSTT = ${price} USDC`);
+    return price;
+}
+
+async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddress, feeTier = 3000) {
     try {
         const factoryContract = new ethers.Contract(factoryAddress, factoryAbi, provider);
-        const poolAddress = await factoryContract.poolByPair(tokenInAddress, tokenOutAddress);
-        console.log(`Liquidity Pool for ${tokenInAddress} - ${tokenOutAddress}: ${poolAddress}`);
+        const poolAddress = await factoryContract.getPool(tokenInAddress, tokenOutAddress, feeTier);
+        console.log(`Liquidity Pool for ${tokenInAddress} - ${tokenOutAddress} (Fee ${feeTier}): ${poolAddress}`);
         if (poolAddress === ethers.ZeroAddress) {
+            console.log(`No pool found for fee tier ${feeTier}.`);
             return null;
         }
         const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
@@ -123,7 +129,7 @@ async function checkLiquidityPool(factoryAddress, tokenInAddress, tokenOutAddres
         console.log(`Pool Fee: ${fee} (basis points)`);
         console.log(`Pool Tokens: token0=${token0}, token1=${token1}`);
         console.log(`USDC Balance in Pool: ${ethers.formatUnits(usdcBalance, 6)} USDC`);
-        return liquidity > 0 ? { poolAddress, fee } : null;
+        return { poolAddress, fee, liquidity: liquidity > 0 };
     } catch (error) {
         console.error("Error checking liquidity pool:", error.message);
         return null;
@@ -155,15 +161,7 @@ async function wrapSTT(amount) {
     console.log(`Wrapped STT to WSTT: ${depositTx.hash}`);
 }
 
-async function unwrapWSTT(amount) {
-    const wsttContract = tokenContracts["WSTT"];
-    console.log(`Unwrapping ${ethers.formatUnits(amount, 18)} WSTT to STT...`);
-    const withdrawTx = await wsttContract.withdraw(amount, { gasLimit: 100000 });
-    await withdrawTx.wait();
-    console.log(`Unwrapped WSTT to STT: ${withdrawTx.hash}`);
-}
-
-async function swapTokens(tokenInKey, tokenOutKey, amountIn, poolDeployer, factory) {
+async function swapTokens(tokenInKey, tokenOutKey, amountIn, factory) {
     const tokenIn = TOKENS[tokenInKey];
     const tokenOut = TOKENS[tokenOutKey];
     const amount = ethers.parseUnits(amountIn.toString(), tokenIn.decimals);
@@ -192,27 +190,25 @@ async function swapTokens(tokenInKey, tokenOutKey, amountIn, poolDeployer, facto
     const wNativeToken = await quickSwapContract.WNativeToken();
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
-    const poolInfo = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress);
-    if (!poolInfo) {
-        throw new Error(`No viable liquidity pool for ${tokenIn.symbol} > ${tokenOut.symbol}`);
+    const poolInfo = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress, 3000);
+    if (!poolInfo || !poolInfo.liquidity) {
+        throw new Error(`No viable liquidity pool for ${tokenIn.symbol} > ${tokenOut.symbol} with fee tier 3000`);
     }
-    const { poolAddress, fee } = poolInfo;
+    const { poolAddress } = poolInfo;
 
-    // Use exact manual swap minimum for WSTT > USDC or STT > USDC
-    let amountOutMinimum;
-    if ((tokenInKey === "WSTT" || tokenInKey === "STT") && tokenOutKey === "USDC" && amountIn === "0.1") {
-        amountOutMinimum = ethers.parseUnits("0.014481", tokenOut.decimals); // From manual swap
-        console.log(`Using manual swap minimum received: ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
-    } else {
-        amountOutMinimum = 0;
-        console.log("No specific minimum set, using 0 (no slippage protection)");
-    }
+    // Get current price from pool
+    const price = await getPoolPrice(poolAddress);
+    const amountOutExpected = price * Number(amountIn);
+    let amountOutMinimum = ethers.parseUnits(amountOutExpected.toFixed(6), tokenOut.decimals);
+    // Apply 0.5% slippage tolerance
+    amountOutMinimum = amountOutMinimum * BigInt(995) / BigInt(1000);
+    console.log(`Expected output: ${amountOutExpected} ${tokenOut.symbol}, Minimum with slippage: ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
 
     const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
     const params = {
         tokenIn: tokenInAddress,
         tokenOut: tokenOutAddress,
-        deployer: "0x0000000000000000000000000000000000000000", // Match manual swap
+        deployer: "0x0000000000000000000000000000000000000000",
         recipient: wallet.address,
         deadline: deadline,
         amountIn: amount,
@@ -222,9 +218,8 @@ async function swapTokens(tokenInKey, tokenOutKey, amountIn, poolDeployer, facto
 
     console.log("Swap Parameters:", JSON.stringify(params, (key, value) => typeof value === 'bigint' ? value.toString() : value));
 
-    const overrides = { gasLimit: 200000 }; // Slightly higher than manual swap’s limit
+    const overrides = { gasLimit: 250000 };
 
-    // Simulate the transaction
     console.log("Simulating transaction...");
     const tx = await quickSwapContract.exactInputSingle.populateTransaction(params, overrides);
     try {
@@ -241,21 +236,10 @@ async function swapTokens(tokenInKey, tokenOutKey, amountIn, poolDeployer, facto
     const swapTx = await quickSwapContract.exactInputSingle(params, overrides);
     const receipt = await swapTx.wait();
     console.log(`Swapped ${tokenIn.symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
-
-    if (tokenOut.isNative) {
-        const wsttBalance = await tokenContracts["WSTT"].balanceOf(wallet.address);
-        if (wsttBalance > 0) {
-            await unwrapWSTT(wsttBalance);
-        }
-    }
 }
 
 async function performQuickSwap(wallet, tokenInKey, tokenOutKey, amountIn, provider) {
     try {
-        if (!wallet || !tokenInKey || !tokenOutKey || amountIn === undefined || !provider) {
-            throw new Error(`Missing required parameters`);
-        }
-
         console.log(`\n=== Starting QuickSwap: ${tokenInKey} to ${tokenOutKey} ===`);
         console.log("Wallet Address:", wallet.address);
 
@@ -274,19 +258,19 @@ async function performQuickSwap(wallet, tokenInKey, tokenOutKey, amountIn, provi
             throw new Error(`Insufficient STT for gas: ${ethers.formatEther(sttBalance)}`);
         }
 
-        const { poolDeployer, factory } = await logContractDetails();
+        const { factory } = await logContractDetails();
 
         const tokenInAddress = tokenInInfo.isNative ? wNativeTokenAddress : tokenInInfo.address;
         const tokenOutAddress = tokenOutInfo.isNative ? wNativeTokenAddress : tokenOutInfo.address;
 
         console.log(`\nChecking liquidity for ${tokenInKey} > ${tokenOutKey}...`);
-        const poolInfo = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress);
+        const poolInfo = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress, 3000);
         if (!poolInfo) {
             throw new Error(`No viable liquidity pool for ${tokenInKey} > ${tokenOutKey}`);
         }
         console.log(`Liquidity pool found: ${poolInfo.poolAddress}`);
 
-        await swapTokens(tokenInKey, tokenOutKey, ethers.formatUnits(amountIn, tokenInInfo.decimals), poolDeployer, factory);
+        await swapTokens(tokenInKey, tokenOutKey, ethers.formatUnits(amountIn, tokenInInfo.decimals), factory);
 
         console.log(`\n=== Swap Completed: ${tokenInKey} to ${tokenOutKey} ===`);
         console.log("Final Balances:");
