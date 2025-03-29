@@ -176,17 +176,13 @@ async function swapTokens(tokenInKey, tokenOutKey, amountIn, factory) {
     if (tokenIn.isNative) {
         balance = await provider.getBalance(wallet.address);
         console.log(`STT Balance: ${ethers.formatEther(balance)}`);
-        if (balance < amount) {
-            throw new Error(`Insufficient STT balance: ${ethers.formatEther(balance)}, required: ${ethers.formatEther(amount)}`);
-        }
+        if (balance < amount) throw new Error(`Insufficient STT balance`);
         await wrapSTT(amount);
         tokenInAddress = TOKENS["WSTT"].address;
     } else {
         balance = await tokenContracts[tokenInKey].balanceOf(wallet.address);
         console.log(`${tokenIn.symbol} Balance: ${ethers.formatUnits(balance, tokenIn.decimals)}`);
-        if (balance < amount) {
-            throw new Error(`Insufficient ${tokenIn.symbol} balance: ${ethers.formatUnits(balance, tokenIn.decimals)}`);
-        }
+        if (balance < amount) throw new Error(`Insufficient ${tokenIn.symbol} balance`);
     }
 
     await approveToken(tokenContracts[tokenIn.isNative ? "WSTT" : tokenInKey], tokenIn.isNative ? "WSTT" : tokenIn.symbol, amount, tokenIn.decimals);
@@ -195,16 +191,12 @@ async function swapTokens(tokenInKey, tokenOutKey, amountIn, factory) {
     const tokenOutAddress = tokenOut.isNative ? wNativeToken : tokenOut.address;
 
     const poolInfo = await checkLiquidityPool(factory, tokenInAddress, tokenOutAddress, 111);
-    if (!poolInfo || !poolInfo.liquidity) {
-        throw new Error(`No viable liquidity pool for ${tokenIn.symbol} > ${tokenOut.symbol} with fee tier 111`);
-    }
-    const { poolAddress } = poolInfo;
+    if (!poolInfo || !poolInfo.liquidity) throw new Error(`No viable liquidity pool`);
 
-    const price = await getPoolPrice(poolAddress);
+    const price = await getPoolPrice(poolInfo.poolAddress);
     const amountOutExpected = price * Number(amountIn);
     let amountOutMinimum = ethers.parseUnits(amountOutExpected.toFixed(6), tokenOut.decimals);
     amountOutMinimum = amountOutMinimum * BigInt(950) / BigInt(1000); // 5% slippage
-    console.log(`Expected output: ${amountOutExpected} ${tokenOut.symbol}, Minimum with slippage: ${ethers.formatUnits(amountOutMinimum, tokenOut.decimals)} ${tokenOut.symbol}`);
 
     const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
     const params = {
@@ -218,24 +210,19 @@ async function swapTokens(tokenInKey, tokenOutKey, amountIn, factory) {
         limitSqrtPrice: 0
     };
 
-    console.log("Swap Parameters:", JSON.stringify(params, (key, value) => typeof value === 'bigint' ? value.toString() : value));
-
-    const overrides = { gasLimit: 250000 };
+    const overrides = { gasLimit: 500000 };
 
     console.log("Simulating transaction...");
-    const tx = await quickSwapContract.exactInputSingle.populateTransaction(params, overrides);
+    const tx = await quickSwapContract.exactInputSingleSupportingFeeOnTransferTokens.populateTransaction(params, overrides);
     try {
         await provider.call(tx);
         console.log("Simulation successful");
     } catch (simError) {
-        console.error("Simulation failed:", simError.message);
-        if (simError.data) {
-            console.error("Simulation revert data:", simError.data);
-        }
+        console.error("Simulation failed:", simError.message, simError.data);
         throw simError;
     }
 
-    const swapTx = await quickSwapContract.exactInputSingle(params, overrides);
+    const swapTx = await quickSwapContract.exactInputSingleSupportingFeeOnTransferTokens(params, overrides);
     const receipt = await swapTx.wait();
     console.log(`Swapped ${tokenIn.symbol} to ${tokenOut.symbol}: ${swapTx.hash}`);
 }
